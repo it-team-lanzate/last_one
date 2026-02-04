@@ -1,0 +1,21 @@
+# Perfil orientado a retorno anual ≥20% con DD contenido
+# Extiende base; prioriza más operaciones manteniendo protecciones (breakeven, cap, trail amplio).
+
+extends: base.yaml
+
+strategy:
+  squeeze_percentile_max: null   # más señales (media en lugar de percentil)
+  squeeze_min_bars: 4
+  trend_filter: false
+  tp1_r: 1.5
+  tp1_close_pct: 0.4
+  chandelier_atr_mult: 2.0
+  trail_activation_r: 0.5
+  time_stop_bars: 10
+  quality_filter: true
+  entry_require_close_above: true
+
+risk:
+  risk_pct: 0.006               # 0.6% por trade (más tamaño cuando gana)
+  max_drawdown_stop_pct: 0.15
+  max_consecutive_losses: 4

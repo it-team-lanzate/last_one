@@ -1,0 +1,58 @@
+# Base config - Objetivo: retorno anual ≥20% minimizando DD
+# Para más señales probar: configs/target_20pct_annual.yaml
+
+symbol: BTCUSDT
+timeframe: 4h
+
+# Strategy (selectiva: pocas operaciones de alta calidad, dejar correr ganancias)
+strategy:
+  name: squeeze_breakout_long
+  squeeze_mode: relative
+  squeeze_percentile_max: null   # null = media (máximo de señales)
+  squeeze_percentile_lookback: 100
+  squeeze_min_bars: 4
+  squeeze_width_ratio: 2.0
+  entry_atr_mult: 0.10
+  entry_require_close_above: true   # filtrar breakouts solo de mecha
+  stop_range_atr_mult: 0.10
+  stop_entry_atr_mult: 1.8      # stop razonable (limita pérdida por operación)
+  tp1_r: 1.5                     # primer objetivo +1.5R
+  tp1_close_pct: 0.4            # cierra 40% en TP1, deja 60% al trail
+  chandelier_lookback: 30
+  chandelier_atr_mult: 2.0      # trail amplio para no cortar ganadores pronto
+  trail_activation_r: 0.5       # aplicar trail solo tras +0.5R (evita salir por ruido)
+  time_stop_bars: 15            # más tiempo para dejar correr ganadores
+  time_stop_min_r: 0.5
+  quality_filter: true           # TrueRange > 1.1*SMA(TR) en entrada
+  trend_filter: true             # solo largos en tendencia alcista (mejor win rate)
+  trend_period: 100
+  min_r_atr_mult: 0.4            # aceptar rangos más pequeños
+
+# Indicators
+indicators:
+  bb_period: 20
+  bb_std: 2.0
+  kc_period: 20
+  kc_atr_mult: 1.5
+  atr_period: 14
+  atr_period_stops: 14
+
+# Fees & slippage
+fees:
+  fee_rate_side: 0.0006
+  slippage_side: 0.0002
+  stress_mode: false
+
+# Risk: objetivo ≥20% anual con DD contenido
+risk:
+  risk_pct: 0.009               # +retorno vs 0.008 (243%→300%, 26% anual); DD 2.77% (0.008→2.46%)
+  risk_use_initial_capital: false
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.15
+  max_consecutive_losses: 10    # evita cortar secuencia tras racha de pérdidas
+
+# Backtest range
+backtest:
+  start_date: "2023-01-01"
+  end_date: "2025-12-31"
+  initial_capital: 10000.0

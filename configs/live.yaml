@@ -1,0 +1,14 @@
+# Paper-live config - simulated real-time on 4H candles
+
+extends: base.yaml
+
+paper_live:
+  # No real orders; simulate fills with OHLCV + slippage
+  poll_interval_seconds: 60   # check for new 4H close
+  initial_capital: 10000.0
+
+risk:
+  risk_pct: 0.01
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.15   # stop paper if DD > 15%
+  max_consecutive_losses: 3     # pause entries after 3 losses

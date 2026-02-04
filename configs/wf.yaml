@@ -1,0 +1,14 @@
+# Walk-forward config - sliding windows
+
+extends: base.yaml
+
+walk_forward:
+  train_days: 180      # in-sample (train) window in days
+  test_days: 90       # out-of-sample: ~14 trades/ventana (4H squeeze)
+  step_days: 45       # paso: menos ventanas solapadas, métricas más estables
+
+# Same strategy/risk as base; dates from CLI or here (WF windows slide over this range)
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2025-12-31"
+  initial_capital: 10000.0

@@ -1,0 +1,27 @@
+# Entorno y secretos
+.env
+venv/
+.venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Datos y cache (regenerables)
+data/cache/*.parquet
+data/*.db
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

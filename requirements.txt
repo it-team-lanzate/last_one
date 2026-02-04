@@ -1,0 +1,25 @@
+# Binance / data
+ccxt>=4.0.0
+python-dotenv>=1.0.0
+pyyaml>=6.0
+
+# Data & numerics
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Storage
+sqlalchemy>=2.0.0
+
+# Dashboard
+streamlit>=1.28.0
+plotly>=5.18.0
+
+# CLI & logging
+pyyaml>=6.0
+
+# Tests
+pytest>=7.4.0
+pytest-cov>=4.1.0
+
+# Export
+pyarrow>=14.0.0
