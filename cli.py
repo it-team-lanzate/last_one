@@ -111,18 +111,39 @@ def cmd_walkforward(args: argparse.Namespace) -> None:
              run_id, len(wf_result.windows), wf_result.mean_return_pct, wf_result.mean_pf)
 
 
-def cmd_paper_live(args: argparse.Namespace) -> None:
-    """Paper-live: simulated real-time on 4H candles. No real orders."""
+def cmd_weekly_report(args: argparse.Namespace) -> None:
+    """Envía por Telegram el resumen semanal (últimos 7 días) desde paper_live_state.json."""
+    from pathlib import Path
+    from src.paper_live.runner import send_weekly_report_manual
     config = load_config(args.config)
-    log.info("Paper-live started (simulated). Use dashboard to monitor. Stop with Ctrl+C.")
-    # In a full implementation we would loop: poll for new 4H close, run one bar, update state.
-    # For minimal deliverable we just run a backtest up to "now" and store as paper run.
+    symbol = config.get("symbol", "BTCUSDT")
+    state_path = Path(args.state) if getattr(args, "state", None) else None
+    ok = send_weekly_report_manual(state_path=state_path, symbol=symbol)
+    if ok:
+        log.info("Resumen semanal enviado por Telegram")
+    else:
+        log.warning("No se pudo enviar (revisa TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en .env)")
+
+
+def cmd_paper_live(args: argparse.Namespace) -> None:
+    """Paper-trade: con --execute coloca órdenes reales en Binance Testnet; sin él, backtest hasta hoy."""
+    if getattr(args, "execute", False):
+        from src.paper_live.runner import run_live_loop
+        config = load_config(args.config)
+        pl = config.get("paper_live", {})
+        poll = int(pl.get("poll_interval_seconds", 60))
+        run_live_loop(args.config, poll_interval_seconds=poll)
+        return
+    config = load_config(args.config)
+    log.info("Paper-live: simulando con datos hasta la fecha indicada. Sin órdenes reales.")
     symbol = config.get("symbol", "BTCUSDT")
     timeframe = config.get("timeframe", "4h")
     pl = config.get("paper_live", config.get("backtest", {}))
-    start = pl.get("start_date") or "2024-01-01"
-    end = "2024-12-31"  # or datetime.utcnow().strftime("%Y-%m-%d")
-    df = get_ohlcv_feed(symbol=symbol, timeframe=timeframe, start_date=start, end_date=end, use_cache=True)
+    start = getattr(args, "start_date", None) or pl.get("start_date") or "2024-01-01"
+    end_raw = getattr(args, "end_date", None) or pl.get("end_date") or "today"
+    end = _resolve_end_date(end_raw)
+    cache_dir = getattr(args, "cache_dir", None) or "data/cache"
+    df = get_ohlcv_feed(symbol=symbol, timeframe=timeframe, start_date=start, end_date=end, cache_dir=cache_dir, use_cache=True)
     if df.empty:
         log.error("No data for paper-live")
         return
@@ -170,7 +191,15 @@ def main() -> None:
 
     p_pl = sub.add_parser("paper-live")
     _add_common(p_pl)
+    p_pl.add_argument("--start-date", default=None, help="Inicio del paper trade YYYY-MM-DD (sin --execute)")
+    p_pl.add_argument("--end-date", default=None, help="Fin YYYY-MM-DD o 'today' (sin --execute)")
+    p_pl.add_argument("--execute", action="store_true", help="Ejecutar órdenes reales en Binance Futures Testnet")
     p_pl.set_defaults(func=cmd_paper_live)
+
+    p_weekly = sub.add_parser("weekly-report")
+    _add_common(p_weekly)
+    p_weekly.add_argument("--state", default=None, help="Ruta a paper_live_state.json (default: data/paper_live_state.json)")
+    p_weekly.set_defaults(func=cmd_weekly_report)
 
     args = parser.parse_args()
     setup_logging(level=args.log_level, log_dir=args.log_dir)

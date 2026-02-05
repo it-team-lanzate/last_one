@@ -42,11 +42,46 @@ python cli.py backtest --config configs/base.yaml
 # Walk-forward (ventanas deslizantes)
 python cli.py walkforward --config configs/wf.yaml
 
-# Paper-live (simulado en tiempo real; sin órdenes reales)
+# Paper-live simulado (backtest hasta hoy, sin órdenes)
 python cli.py paper-live --config configs/live.yaml
+
+# Paper-live con órdenes reales en Binance Futures Testnet (las posiciones se ven en testnet.binancefuture.com)
+python cli.py paper-live --config configs/live.yaml --execute
 ```
 
 Opciones comunes: `--config`, `--cache-dir`, `--db`, `--log-level`, `--log-dir`.
+
+### Paper trade con órdenes reales (Binance Testnet)
+
+Para **ejecutar órdenes en paper** y **ver las posiciones en Binance** (sin dinero real):
+
+1. **API del Testnet**: en [testnet.binancefuture.com](https://testnet.binancefuture.com) → API Management, crea API Key y Secret. Ponlas en `.env`:
+   ```env
+   BINANCE_FUTURES_TESTNET_API_KEY=tu_api_key
+   BINANCE_FUTURES_TESTNET_SECRET=tu_secret
+   ```
+2. **Saldo de prueba**: en la web del Testnet suele haber USDT de prueba; si no, usa la opción "Get USDT" o similar.
+3. **Ejecutar el bucle** (deja el proceso corriendo; Ctrl+C para parar):
+   ```bash
+   python cli.py paper-live --config configs/live.yaml --execute
+   ```
+4. **Ver posiciones**: abre [testnet.binancefuture.com](https://testnet.binancefuture.com) → Futures → posiciones y órdenes. Las entradas/salidas que dispare la estrategia aparecerán ahí.
+
+El script revisa cada cierto tiempo (p. ej. 2 min, ver `poll_interval_seconds` en `configs/live.yaml`) si cerró una vela 4H; si hay señal de entrada o salida, coloca **market** en el Testnet. Estado local en `data/paper_live_state.json`.
+
+### Notificaciones por Telegram
+
+Con `TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` en `.env` (crear bot con [@BotFather](https://t.me/BotFather), chat_id con [@userinfobot](https://t.me/userinfobot)):
+
+- **Al abrir posición**: mensaje con entrada, stop y cantidad.
+- **Al cerrar posición**: mensaje indicando si fue **éxito** o **pérdida** y PnL neto en USDT.
+- **Resumen semanal**: si el proceso `--execute` está en marcha, los **viernes a las 10:00 AM Argentina** (13:00 UTC) se envía un resumen de los últimos 7 días (operaciones, win rate, PnL total, profit factor).
+
+Para enviar el resumen semanal a mano (p. ej. desde cron):
+
+```bash
+python cli.py weekly-report --config configs/live.yaml
+```
 
 ## Dashboard
 
@@ -108,5 +143,5 @@ pytest tests/ -v
 ## Restricciones
 
 - No se usan cruces de medias como señal principal.
-- Todo es paper (simulado); no se envían órdenes reales aunque se use testnet para datos.
+- Sin `--execute`: todo es simulado (backtest hasta hoy). Con `--execute`: se envían órdenes reales **solo al Binance Futures Testnet** (sandbox), no a producción.
 - Prioridad: claridad y robustez sobre optimización prematura.
