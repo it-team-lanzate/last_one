@@ -1,6 +1,7 @@
 # Paper-trade: misma estrategia que base.
 # Sin órdenes reales: python cli.py paper-live --config configs/live.yaml
-# Con órdenes en Testnet: python cli.py paper-live --config configs/live.yaml --execute
+# Con órdenes reales en Bybit Testnet: python cli.py paper-live --config configs/live.yaml --execute
+# Posiciones visibles en: https://testnet.bybit.com/
 
 extends: base.yaml
 

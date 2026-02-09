@@ -1,11 +1,11 @@
 # BTCUSDT 4H Squeeze Breakout (LONG-only)
 
-App en Python para operar **BTCUSDT Perpetual en 4H** conectada a **Binance Futures Testnet** (demo). Estrategia LONG-only: Squeeze → Breakout.
+App en Python para operar **BTCUSDT Perpetual en 4H** con órdenes reales en **Bybit Futures Testnet** (demo). Estrategia LONG-only: Squeeze → Breakout.
 
 ## Requisitos
 
 - Python 3.10+
-- Cuenta en [Binance Futures Testnet](https://testnet.binancefuture.com/) (API keys para datos)
+- Cuenta en [Bybit Testnet](https://testnet.bybit.com/) (API keys para órdenes)
 
 ## Setup
 
@@ -21,9 +21,9 @@ python -m venv .venv
 # Dependencias
 pip install -r requirements.txt
 
-# Credenciales: copiar .env.example a .env y rellenar (nunca hardcode)
+# Credenciales: copiar .env.example a .env y rellenar
 copy .env.example .env
-# Editar .env con BINANCE_FUTURES_TESTNET_API_KEY y BINANCE_FUTURES_TESTNET_SECRET
+# Editar .env con BYBIT_TESTNET_API_KEY y BYBIT_TESTNET_SECRET
 ```
 
 ## Comandos CLI
@@ -45,29 +45,29 @@ python cli.py walkforward --config configs/wf.yaml
 # Paper-live simulado (backtest hasta hoy, sin órdenes)
 python cli.py paper-live --config configs/live.yaml
 
-# Paper-live con órdenes reales en Binance Futures Testnet (las posiciones se ven en testnet.binancefuture.com)
+# Paper-live con órdenes reales en Bybit Futures Testnet (posiciones visibles en testnet.bybit.com)
 python cli.py paper-live --config configs/live.yaml --execute
 ```
 
 Opciones comunes: `--config`, `--cache-dir`, `--db`, `--log-level`, `--log-dir`.
 
-### Paper trade con órdenes reales (Binance Testnet)
+### Paper trade en vivo (Bybit Testnet)
 
-Para **ejecutar órdenes en paper** y **ver las posiciones en Binance** (sin dinero real):
+Trading con **órdenes reales** en Bybit Futures Testnet. Las posiciones se ven en [testnet.bybit.com](https://testnet.bybit.com/).
 
-1. **API del Testnet**: en [testnet.binancefuture.com](https://testnet.binancefuture.com) → API Management, crea API Key y Secret. Ponlas en `.env`:
-   ```env
-   BINANCE_FUTURES_TESTNET_API_KEY=tu_api_key
-   BINANCE_FUTURES_TESTNET_SECRET=tu_secret
-   ```
-2. **Saldo de prueba**: en la web del Testnet suele haber USDT de prueba; si no, usa la opción "Get USDT" o similar.
-3. **Ejecutar el bucle** (deja el proceso corriendo; Ctrl+C para parar):
-   ```bash
-   python cli.py paper-live --config configs/live.yaml --execute
-   ```
-4. **Ver posiciones**: abre [testnet.binancefuture.com](https://testnet.binancefuture.com) → Futures → posiciones y órdenes. Las entradas/salidas que dispare la estrategia aparecerán ahí.
+**Prerrequisitos**:
+1. Crear cuenta en [Bybit Testnet](https://testnet.bybit.com/)
+2. Ir a API Management → crear API key
+3. Copiar `BYBIT_TESTNET_API_KEY` y `BYBIT_TESTNET_SECRET` en `.env`
 
-El script revisa cada cierto tiempo (p. ej. 2 min, ver `poll_interval_seconds` en `configs/live.yaml`) si cerró una vela 4H; si hay señal de entrada o salida, coloca **market** en el Testnet. Estado local en `data/paper_live_state.json`.
+**Ejecutar**:
+```bash
+python cli.py paper-live --config configs/live.yaml --execute
+```
+
+El script revisa cada cierto tiempo (p. ej. 2 min, ver `poll_interval_seconds` en `configs/live.yaml`) si cerró una vela 4H. Si hay señal de entrada o salida, **coloca la orden real** en Bybit Testnet. Los datos OHLCV se obtienen de Binance (API pública, sin keys).
+
+Capital disponible: el balance de USDT en tu cuenta Bybit Testnet (se obtiene fondos de prueba gratis al crear la cuenta).
 
 ### Notificaciones por Telegram
 
@@ -143,5 +143,5 @@ pytest tests/ -v
 ## Restricciones
 
 - No se usan cruces de medias como señal principal.
-- Sin `--execute`: todo es simulado (backtest hasta hoy). Con `--execute`: se envían órdenes reales **solo al Binance Futures Testnet** (sandbox), no a producción.
+- Sin `--execute`: todo es simulado (backtest hasta hoy). Con `--execute`: se envían órdenes reales **solo a Bybit Futures Testnet** (sandbox), no a producción.
 - Prioridad: claridad y robustez sobre optimización prematura.

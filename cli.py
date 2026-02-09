@@ -126,7 +126,7 @@ def cmd_weekly_report(args: argparse.Namespace) -> None:
 
 
 def cmd_paper_live(args: argparse.Namespace) -> None:
-    """Paper-trade: con --execute coloca órdenes reales en Binance Testnet; sin él, backtest hasta hoy."""
+    """Paper-trade: con --execute coloca órdenes reales en Bybit Testnet; sin él, backtest hasta hoy."""
     if getattr(args, "execute", False):
         from src.paper_live.runner import run_live_loop
         config = load_config(args.config)
@@ -193,7 +193,7 @@ def main() -> None:
     _add_common(p_pl)
     p_pl.add_argument("--start-date", default=None, help="Inicio del paper trade YYYY-MM-DD (sin --execute)")
     p_pl.add_argument("--end-date", default=None, help="Fin YYYY-MM-DD o 'today' (sin --execute)")
-    p_pl.add_argument("--execute", action="store_true", help="Ejecutar órdenes reales en Binance Futures Testnet")
+    p_pl.add_argument("--execute", action="store_true", help="Ejecutar órdenes reales en Bybit Futures Testnet")
     p_pl.set_defaults(func=cmd_paper_live)
 
     p_weekly = sub.add_parser("weekly-report")

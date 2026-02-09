@@ -122,5 +122,6 @@ def notify_weekly_summary(stats: dict[str, Any], symbol: str = "BTCUSDT") -> boo
         elif pf == float("inf") and n:
             msg += "• Profit factor: ∞\n"
         if stats.get("max_dd_pct") is not None:
-            msg += f"• Max DD: {escape_html(f'{stats['max_dd_pct']:.2f}')}%"
+            dd_val = stats["max_dd_pct"]
+            msg += f"• Max DD: {escape_html(f'{dd_val:.2f}')}%"
     return send_message(msg)

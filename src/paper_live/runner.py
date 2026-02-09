@@ -1,8 +1,8 @@
 """
-Paper live con órdenes reales en Binance Futures Testnet.
-Cada cierre de vela 4H: evalúa entrada/salida y coloca market orders.
-Estado en data/paper_live_state.json. Posiciones visibles en testnet.binancefuture.com
-Notificaciones por Telegram al abrir/cerrar y resumen semanal (si TELEGRAM_* en .env).
+Paper live con órdenes reales en Bybit Futures Testnet.
+Cada cierre de vela 4H: evalúa entrada/salida y coloca market orders en Bybit Testnet.
+Estado en data/paper_live_state.json. Posiciones visibles en https://testnet.bybit.com/
+Notificaciones por Telegram al abrir/cerrar y resumen semanal.
 """
 import json
 import logging
@@ -17,7 +17,7 @@ from src.config import load_config
 from src.data.downloader import download_ohlcv
 from src.strategy.signals import compute_signals
 from src.strategy.squeeze import SqueezeRange
-from src.execution.binance_testnet_broker import BinanceTestnetBroker
+from src.execution.bybit_testnet_broker import BybitTestnetBroker
 from src.notifications.telegram import (
     is_configured as telegram_configured,
     notify_position_opened,
@@ -145,7 +145,7 @@ def run_live_loop(
 ) -> None:
     """
     Bucle principal: cada poll_interval_seconds comprueba si cerró una vela 4H.
-    Si cerró: descarga OHLCV, calcula señales, evalúa entrada/salida y coloca órdenes en Testnet.
+    Si cerró: descarga OHLCV, calcula señales, evalúa entrada/salida y simula órdenes.
     """
     global STATE_PATH
     if state_path is not None:
@@ -157,6 +157,7 @@ def run_live_loop(
     pl = config.get("paper_live", config.get("backtest", {}))
     symbol_ccxt = _symbol_to_ccxt(config.get("symbol", "BTCUSDT"))
     timeframe = config.get("timeframe", "4h")
+    initial_capital = float(pl.get("initial_capital", 10000.0))
 
     quality_filter = strat.get("quality_filter", False)
     entry_require_close_above = strat.get("entry_require_close_above", True)
@@ -172,9 +173,9 @@ def run_live_loop(
     time_stop_min_r = float(strat.get("time_stop_min_r", 0.5))
     risk_pct = float(risk.get("risk_pct", 0.009))
 
-    broker = BinanceTestnetBroker(config)
+    broker = BybitTestnetBroker(config)
     symbol_label = config.get("symbol", "BTCUSDT")
-    log.info("Paper live (Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", symbol_ccxt, poll_interval_seconds)
+    log.info("Paper live (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", symbol_ccxt, poll_interval_seconds)
 
     while True:
         try:
@@ -185,7 +186,35 @@ def run_live_loop(
             entered_ranges = state.get("entered_ranges", [])
             position = state.get("position")
 
-            # Datos recientes desde Testnet
+            # Sincronizar posición con Bybit Testnet (fuente de verdad)
+            bybit_pos = broker.get_position()
+            if position is not None and bybit_pos is None:
+                log.warning("State dice posición abierta pero Bybit no tiene. Limpiando state.")
+                state.pop("position", None)
+                position = None
+                _save_state(state)
+            elif position is None and bybit_pos is not None:
+                log.warning("Bybit tiene posición abierta pero state no. Registrando en state (solo qty/entry_price).")
+                state["position"] = {
+                    "entry_time": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "entry_price": bybit_pos["entry_price"],
+                    "stop": 0.0,
+                    "r_value": 0.0,
+                    "qty": bybit_pos["qty"],
+                    "bars_in_trade": 0,
+                    "tp1_done": False,
+                    "tp1_r": tp1_r,
+                    "tp1_close_pct": tp1_close_pct,
+                    "chandelier_lookback": chandelier_lookback,
+                    "chandelier_atr_mult": chandelier_atr_mult,
+                    "trail_activation_r": trail_activation_r,
+                    "time_stop_bars": time_stop_bars,
+                    "time_stop_min_r": time_stop_min_r,
+                }
+                position = state["position"]
+                _save_state(state)
+
+            # Datos OHLCV recientes (Binance producción, datos públicos)
             df = download_ohlcv(symbol=symbol_ccxt, timeframe=timeframe, limit=OHLCV_LIMIT)
             if df.empty or len(df) < 100:
                 log.warning("Pocos datos OHLCV, reintentando más tarde")
@@ -216,34 +245,20 @@ def run_live_loop(
 
             # Evitar procesar dos veces la misma vela
             if last_candle_time == bar_ts_str:
+                balance = broker.get_balance_usdt()
+                pos_status = "EN POSICIÓN" if position else "SIN POSICIÓN"
+                log.info(
+                    "Heartbeat | Vela %s ya procesada | %s | Balance: %.2f USDT | Precio: %.2f | Próximo check en %ss",
+                    bar_ts_str, pos_status, balance, close, poll_interval_seconds,
+                )
                 time.sleep(poll_interval_seconds)
                 continue
 
+            log.info(">>> Nueva vela detectada: %s | Close=%.2f | Ranges=%d", bar_ts_str, close, len(ranges))
             state["last_candle_time"] = bar_ts_str
             i = len(df) - 1
 
             # --- Tenemos posición: evaluar salidas ---
-            pos_broker = broker.get_position()
-            if position is None and pos_broker:
-                # Posición en exchange pero no en state (ej. reinicio): reconstruir state mínimo para salidas
-                position = {
-                    "entry_price": pos_broker["entry_price"],
-                    "stop": pos_broker["entry_price"] * 0.95,
-                    "r_value": pos_broker["entry_price"] * 0.02,
-                    "qty": pos_broker["qty"],
-                    "bars_in_trade": 0,
-                    "tp1_done": False,
-                    "tp1_r": tp1_r,
-                    "tp1_close_pct": tp1_close_pct,
-                    "chandelier_lookback": chandelier_lookback,
-                    "chandelier_atr_mult": chandelier_atr_mult,
-                    "trail_activation_r": trail_activation_r,
-                    "time_stop_bars": time_stop_bars,
-                    "time_stop_min_r": time_stop_min_r,
-                }
-                state["position"] = position
-                _save_state(state)
-
             if position is not None:
                 pos = position
                 pos["bars_in_trade"] = pos.get("bars_in_trade", 0) + 1
@@ -261,6 +276,7 @@ def run_live_loop(
                 # 1) Stop
                 if low <= stop:
                     broker.market_sell(qty)
+                    state["balance_usdt"] = broker.get_balance_usdt()
                     _notify_close_and_save(state, broker, pos, "stop_hit", symbol_label)
                     state.pop("position", None)
                     state["entered_ranges"] = list(entered_ranges)
@@ -275,6 +291,7 @@ def run_live_loop(
                     close_qty = round(qty * pos.get("tp1_close_pct", tp1_close_pct), 5)
                     if close_qty > 0:
                         broker.market_sell(close_qty)
+                        state["balance_usdt"] = broker.get_balance_usdt()
                     pos["qty"] = round(qty - close_qty, 5)
                     pos["tp1_done"] = True
                     state["position"] = pos
@@ -288,6 +305,7 @@ def run_live_loop(
                     trail = _chandelier_trail(high_22, atr_14, pos.get("chandelier_atr_mult", chandelier_atr_mult))
                     if close < trail:
                         broker.market_sell(qty)
+                        state["balance_usdt"] = broker.get_balance_usdt()
                         _notify_close_and_save(state, broker, pos, "trail", symbol_label)
                         state.pop("position", None)
                         _save_state(state)
@@ -299,6 +317,7 @@ def run_live_loop(
                 if pos["bars_in_trade"] >= pos.get("time_stop_bars", time_stop_bars):
                     if current_r < pos.get("time_stop_min_r", time_stop_min_r):
                         broker.market_sell(qty)
+                        state["balance_usdt"] = broker.get_balance_usdt()
                         _notify_close_and_save(state, broker, pos, "time_stop", symbol_label)
                         state.pop("position", None)
                         _save_state(state)
@@ -341,6 +360,7 @@ def run_live_loop(
                     break
                 try:
                     broker.market_buy(qty_btc)
+                    state["balance_usdt"] = broker.get_balance_usdt()
                     state["position"] = {
                         "entry_time": bar_ts_str,
                         "entry_price": close,
@@ -360,11 +380,13 @@ def run_live_loop(
                     state["entered_ranges"] = list(entered_ranges) + [ri]
                     _save_state(state)
                     notify_position_opened(close, sr.stop_level, qty_btc, symbol=symbol_label)
-                    log.info("ENTRADA LONG: qty=%s @ ~%s, stop=%s", qty_btc, close, sr.stop_level)
+                    log.info("ENTRADA LONG: qty=%s @ ~%s, stop=%s, balance=%.2f", qty_btc, close, sr.stop_level, state["balance_usdt"])
                 except Exception as e:
                     log.exception("Error al abrir posición: %s", e)
                 break
 
+            if state.get("position") is None and position is None:
+                log.info("Sin señal de entrada en esta vela. Balance: %.2f USDT. Esperando próxima vela...", equity)
             _save_state(state)
         except KeyboardInterrupt:
             log.info("Paper live detenido por el usuario")
