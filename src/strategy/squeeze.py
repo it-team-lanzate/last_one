@@ -35,6 +35,7 @@ def detect_squeeze(
     squeeze_width_ratio: float = 1.5,
     squeeze_percentile_max: int | None = None,
     squeeze_percentile_lookback: int = 100,
+    direction: str = "long",
 ) -> tuple[pd.Series, list[SqueezeRange]]:
     """
     Returns (squeeze_bool series, list of SqueezeRange for each squeeze block).
@@ -96,10 +97,18 @@ def detect_squeeze(
         atr_val = atr_14.iloc[end_idx]
         if pd.isna(atr_val) or atr_val <= 0:
             continue
-        entry_level = range_high + entry_atr_mult * atr_val
-        stop_a = range_low - stop_range_atr_mult * atr_val
-        stop_b = entry_level - stop_entry_atr_mult * atr_val
-        stop_level = min(stop_a, stop_b)
+        if direction == "short":
+            # SHORT: breakdown por debajo del rango
+            entry_level = range_low - entry_atr_mult * atr_val
+            stop_a = range_high + stop_range_atr_mult * atr_val
+            stop_b = entry_level + stop_entry_atr_mult * atr_val
+            stop_level = max(stop_a, stop_b)
+        else:
+            # LONG: breakout por encima del rango
+            entry_level = range_high + entry_atr_mult * atr_val
+            stop_a = range_low - stop_range_atr_mult * atr_val
+            stop_b = entry_level - stop_entry_atr_mult * atr_val
+            stop_level = min(stop_a, stop_b)
         ranges.append(
             SqueezeRange(
                 start_idx=start_idx,
@@ -135,4 +144,5 @@ def squeeze_ranges(
         squeeze_width_ratio=float(strat.get("squeeze_width_ratio", 1.5)),
         squeeze_percentile_max=strat.get("squeeze_percentile_max"),
         squeeze_percentile_lookback=int(strat.get("squeeze_percentile_lookback", 100)),
+        direction=strat.get("direction", "long"),
     )

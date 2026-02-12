@@ -58,12 +58,18 @@ def _save_state(state: dict[str, Any]) -> None:
         json.dump(state, f, indent=2)
 
 
-def _tp1_level(entry: float, r_val: float, tp1_r: float) -> float:
+def _tp1_level(entry: float, r_val: float, tp1_r: float, direction: str = "long") -> float:
+    if direction == "short":
+        return entry - tp1_r * r_val
     return entry + tp1_r * r_val
 
 
-def _chandelier_trail(high_22: float, atr_14: float, mult: float) -> float:
+def _chandelier_trail_long(high_22: float, atr_14: float, mult: float) -> float:
     return high_22 - mult * atr_14
+
+
+def _chandelier_trail_short(low_22: float, atr_14: float, mult: float) -> float:
+    return low_22 + mult * atr_14
 
 
 def _append_closed_trade(state: dict, exit_time: str, entry_price: float, exit_price: float, qty: float, pnl_net: float, exit_reason: str) -> None:
@@ -129,13 +135,54 @@ def _maybe_send_weekly(state: dict, symbol: str) -> bool:
 
 def _notify_close_and_save(state: dict, broker: Any, pos: dict, exit_reason: str, symbol: str) -> None:
     """Obtiene precio de salida, calcula PnL, guarda trade en state y notifica por Telegram."""
-    exit_price = broker.get_last_price()
+    try:
+        exit_price = broker.get_last_price()
+    except Exception as e:
+        log.warning("No se pudo obtener precio de salida: %s. Usando entry como fallback.", e)
+        exit_price = float(pos["entry_price"])
     entry_price = float(pos["entry_price"])
     qty = float(pos["qty"])
     pnl_net = (exit_price - entry_price) * qty
     bar_ts_str = state.get("last_candle_time", datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"))
     _append_closed_trade(state, bar_ts_str, entry_price, exit_price, qty, pnl_net, exit_reason)
     notify_position_closed(entry_price, exit_price, qty, pnl_net, exit_reason, symbol=symbol)
+
+
+def _safe_close_position(
+    broker: Any,
+    qty: float,
+    is_short: bool,
+    state: dict,
+    pos: dict,
+    exit_reason: str,
+    symbol_label: str,
+    entered_ranges: list,
+    dir_label: str,
+) -> bool:
+    """
+    Ejecuta cierre de posición (market order) con manejo de errores.
+    Retorna True si el cierre fue exitoso, False si falló.
+    """
+    try:
+        if is_short:
+            broker.market_buy(qty)
+        else:
+            broker.market_sell(qty)
+        state["balance_usdt"] = broker.get_balance_usdt()
+        _notify_close_and_save(state, broker, pos, exit_reason, symbol_label)
+        state.pop("position", None)
+        state["entered_ranges"] = list(entered_ranges)
+        _save_state(state)
+        return True
+    except Exception as e:
+        log.exception("Error cerrando posición %s (%s): %s. Reintentando en próximo ciclo.", dir_label, exit_reason, e)
+        if telegram_configured():
+            try:
+                from src.notifications.telegram import send_message
+                send_message(f"⚠️ <b>Error cerrando {dir_label}</b> ({exit_reason})\n{str(e)[:200]}")
+            except Exception:
+                pass
+        return False
 
 
 def run_live_loop(
@@ -159,6 +206,8 @@ def run_live_loop(
     timeframe = config.get("timeframe", "4h")
     initial_capital = float(pl.get("initial_capital", 10000.0))
 
+    direction = strat.get("direction", "long")
+    is_short = direction == "short"
     quality_filter = strat.get("quality_filter", False)
     entry_require_close_above = strat.get("entry_require_close_above", True)
     trend_filter = strat.get("trend_filter", True)
@@ -173,9 +222,14 @@ def run_live_loop(
     time_stop_min_r = float(strat.get("time_stop_min_r", 0.5))
     risk_pct = float(risk.get("risk_pct", 0.009))
 
+    # State file separado por dirección para no interferir con LONG
+    if is_short and STATE_PATH == Path("data/paper_live_state.json"):
+        STATE_PATH = Path("data/paper_live_state_short.json")
+
     broker = BybitTestnetBroker(config)
     symbol_label = config.get("symbol", "BTCUSDT")
-    log.info("Paper live (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", symbol_ccxt, poll_interval_seconds)
+    dir_label = "SHORT" if is_short else "LONG"
+    log.info("Paper live %s (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", dir_label, symbol_ccxt, poll_interval_seconds)
 
     while True:
         try:
@@ -187,14 +241,19 @@ def run_live_loop(
             position = state.get("position")
 
             # Sincronizar posición con Bybit Testnet (fuente de verdad)
-            bybit_pos = broker.get_position()
+            try:
+                bybit_pos = broker.get_position(side_filter=direction)
+            except Exception as e:
+                log.warning("Error obteniendo posición de Bybit: %s. Usando state local.", e)
+                bybit_pos = position  # conservar estado actual, no cambiar nada
+
             if position is not None and bybit_pos is None:
                 log.warning("State dice posición abierta pero Bybit no tiene. Limpiando state.")
                 state.pop("position", None)
                 position = None
                 _save_state(state)
             elif position is None and bybit_pos is not None:
-                log.warning("Bybit tiene posición abierta pero state no. Registrando en state (solo qty/entry_price).")
+                log.warning("Bybit tiene posición %s abierta pero state no. Registrando.", direction)
                 state["position"] = {
                     "entry_time": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
                     "entry_price": bybit_pos["entry_price"],
@@ -215,7 +274,12 @@ def run_live_loop(
                 _save_state(state)
 
             # Datos OHLCV recientes (Binance producción, datos públicos)
-            df = download_ohlcv(symbol=symbol_ccxt, timeframe=timeframe, limit=OHLCV_LIMIT)
+            try:
+                df = download_ohlcv(symbol=symbol_ccxt, timeframe=timeframe, limit=OHLCV_LIMIT)
+            except Exception as e:
+                log.warning("Error descargando OHLCV: %s. Reintentando más tarde.", e)
+                time.sleep(poll_interval_seconds)
+                continue
             if df.empty or len(df) < 100:
                 log.warning("Pocos datos OHLCV, reintentando más tarde")
                 time.sleep(poll_interval_seconds)
@@ -228,7 +292,10 @@ def run_live_loop(
                 time.sleep(poll_interval_seconds)
                 continue
 
-            df["high_22"] = df["high"].rolling(chandelier_lookback).max()
+            if is_short:
+                df["low_22"] = df["low"].rolling(chandelier_lookback).min()
+            else:
+                df["high_22"] = df["high"].rolling(chandelier_lookback).max()
             if trend_filter:
                 df["trend_sma"] = df["close"].rolling(trend_period).mean()
 
@@ -239,22 +306,26 @@ def run_live_loop(
             low = float(last_bar["low"])
             close = float(last_bar["close"])
             atr_14 = last_bar.get("atr_14")
-            high_22 = last_bar.get("high_22")
+            chandelier_ref = last_bar.get("low_22") if is_short else last_bar.get("high_22")
             tr = last_bar.get("tr")
             sma_tr_20 = last_bar.get("sma_tr_20")
 
             # Evitar procesar dos veces la misma vela
             if last_candle_time == bar_ts_str:
-                balance = broker.get_balance_usdt()
-                pos_status = "EN POSICIÓN" if position else "SIN POSICIÓN"
+                try:
+                    balance = broker.get_balance_usdt()
+                except Exception as e:
+                    log.warning("Heartbeat: no se pudo obtener balance: %s", e)
+                    balance = 0.0
+                pos_status = f"EN POSICIÓN {dir_label}" if position else "SIN POSICIÓN"
                 log.info(
-                    "Heartbeat | Vela %s ya procesada | %s | Balance: %.2f USDT | Precio: %.2f | Próximo check en %ss",
-                    bar_ts_str, pos_status, balance, close, poll_interval_seconds,
+                    "Heartbeat %s | Vela %s ya procesada | %s | Balance: %.2f USDT | Precio: %.2f | Próximo check en %ss",
+                    dir_label, bar_ts_str, pos_status, balance, close, poll_interval_seconds,
                 )
                 time.sleep(poll_interval_seconds)
                 continue
 
-            log.info(">>> Nueva vela detectada: %s | Close=%.2f | Ranges=%d", bar_ts_str, close, len(ranges))
+            log.info(">>> %s Nueva vela detectada: %s | Close=%.2f | Ranges=%d", dir_label, bar_ts_str, close, len(ranges))
             state["last_candle_time"] = bar_ts_str
             i = len(df) - 1
 
@@ -266,62 +337,72 @@ def run_live_loop(
                 stop = float(pos["stop"])
                 r_val = float(pos["r_value"])
                 qty = float(pos["qty"])
-                current_r = (close - entry_price) / r_val if r_val else 0
+
+                # Current R
+                if is_short:
+                    current_r = (entry_price - close) / r_val if r_val else 0
+                else:
+                    current_r = (close - entry_price) / r_val if r_val else 0
 
                 # Breakeven
-                if current_r >= 0.5 and stop < entry_price:
-                    pos["stop"] = entry_price
-                    stop = entry_price
+                if is_short:
+                    if current_r >= 0.5 and stop > entry_price:
+                        pos["stop"] = entry_price
+                        stop = entry_price
+                else:
+                    if current_r >= 0.5 and stop < entry_price:
+                        pos["stop"] = entry_price
+                        stop = entry_price
 
-                # 1) Stop
-                if low <= stop:
-                    broker.market_sell(qty)
-                    state["balance_usdt"] = broker.get_balance_usdt()
-                    _notify_close_and_save(state, broker, pos, "stop_hit", symbol_label)
-                    state.pop("position", None)
-                    state["entered_ranges"] = list(entered_ranges)
-                    _save_state(state)
-                    log.info("Salida por STOP")
+                # 1) Stop: SHORT = high >= stop; LONG = low <= stop
+                stop_hit = (high >= stop) if is_short else (low <= stop)
+                if stop_hit:
+                    if _safe_close_position(broker, qty, is_short, state, pos, "stop_hit", symbol_label, entered_ranges, dir_label):
+                        log.info("%s Salida por STOP", dir_label)
                     time.sleep(poll_interval_seconds)
                     continue
 
-                # 2) TP1 parcial
-                tp1_level = _tp1_level(entry_price, r_val, pos.get("tp1_r", tp1_r))
-                if not pos.get("tp1_done") and high >= tp1_level:
+                # 2) TP1 parcial: SHORT = low <= tp1; LONG = high >= tp1
+                tp1_level = _tp1_level(entry_price, r_val, pos.get("tp1_r", tp1_r), direction)
+                tp1_hit = (low <= tp1_level) if is_short else (high >= tp1_level)
+                if not pos.get("tp1_done") and tp1_hit:
                     close_qty = round(qty * pos.get("tp1_close_pct", tp1_close_pct), 5)
                     if close_qty > 0:
-                        broker.market_sell(close_qty)
-                        state["balance_usdt"] = broker.get_balance_usdt()
-                    pos["qty"] = round(qty - close_qty, 5)
-                    pos["tp1_done"] = True
-                    state["position"] = pos
-                    _save_state(state)
-                    log.info("TP1 parcial: vendido %s, resto %s", close_qty, pos["qty"])
+                        try:
+                            if is_short:
+                                broker.market_buy(close_qty)
+                            else:
+                                broker.market_sell(close_qty)
+                            state["balance_usdt"] = broker.get_balance_usdt()
+                            pos["qty"] = round(qty - close_qty, 5)
+                            pos["tp1_done"] = True
+                            state["position"] = pos
+                            _save_state(state)
+                            log.info("%s TP1 parcial: cerrado %s, resto %s", dir_label, close_qty, pos["qty"])
+                        except Exception as e:
+                            log.exception("Error en TP1 parcial %s: %s. Reintentando en próximo ciclo.", dir_label, e)
                     time.sleep(poll_interval_seconds)
                     continue
 
                 # 3) Trail
-                if pd.notna(high_22) and pd.notna(atr_14) and current_r >= trail_activation_r:
-                    trail = _chandelier_trail(high_22, atr_14, pos.get("chandelier_atr_mult", chandelier_atr_mult))
-                    if close < trail:
-                        broker.market_sell(qty)
-                        state["balance_usdt"] = broker.get_balance_usdt()
-                        _notify_close_and_save(state, broker, pos, "trail", symbol_label)
-                        state.pop("position", None)
-                        _save_state(state)
-                        log.info("Salida por TRAIL")
+                if pd.notna(chandelier_ref) and pd.notna(atr_14) and current_r >= trail_activation_r:
+                    if is_short:
+                        trail = _chandelier_trail_short(chandelier_ref, atr_14, pos.get("chandelier_atr_mult", chandelier_atr_mult))
+                        trail_exit = close > trail
+                    else:
+                        trail = _chandelier_trail_long(chandelier_ref, atr_14, pos.get("chandelier_atr_mult", chandelier_atr_mult))
+                        trail_exit = close < trail
+                    if trail_exit:
+                        if _safe_close_position(broker, qty, is_short, state, pos, "trail", symbol_label, entered_ranges, dir_label):
+                            log.info("%s Salida por TRAIL", dir_label)
                         time.sleep(poll_interval_seconds)
                         continue
 
                 # 4) Time stop
                 if pos["bars_in_trade"] >= pos.get("time_stop_bars", time_stop_bars):
                     if current_r < pos.get("time_stop_min_r", time_stop_min_r):
-                        broker.market_sell(qty)
-                        state["balance_usdt"] = broker.get_balance_usdt()
-                        _notify_close_and_save(state, broker, pos, "time_stop", symbol_label)
-                        state.pop("position", None)
-                        _save_state(state)
-                        log.info("Salida por TIME STOP")
+                        if _safe_close_position(broker, qty, is_short, state, pos, "time_stop", symbol_label, entered_ranges, dir_label):
+                            log.info("%s Salida por TIME STOP", dir_label)
                         time.sleep(poll_interval_seconds)
                         continue
 
@@ -331,21 +412,41 @@ def run_live_loop(
                 continue
 
             # --- Sin posición: evaluar entrada ---
-            equity = broker.get_balance_usdt()
+            try:
+                equity = broker.get_balance_usdt()
+            except Exception as e:
+                log.warning("Error obteniendo balance para entrada: %s. Saltando ciclo.", e)
+                time.sleep(poll_interval_seconds)
+                continue
             for ri, sr in enumerate(ranges):
                 if sr.end_idx >= i:
                     break
                 if ri in entered_ranges:
                     continue
-                if high < sr.entry_level:
-                    continue
-                if entry_require_close_above and close <= sr.entry_level:
-                    continue
+
+                # Entry trigger
+                if is_short:
+                    if low > sr.entry_level:
+                        continue
+                    if entry_require_close_above and close >= sr.entry_level:
+                        continue
+                else:
+                    if high < sr.entry_level:
+                        continue
+                    if entry_require_close_above and close <= sr.entry_level:
+                        continue
+
+                # Trend filter
                 if trend_filter and "trend_sma" in df.columns:
                     trend_sma = last_bar.get("trend_sma")
-                    if pd.isna(trend_sma) or close <= trend_sma:
-                        continue
-                r_val = sr.entry_level - sr.stop_level
+                    if is_short:
+                        if pd.isna(trend_sma) or close >= trend_sma:
+                            continue
+                    else:
+                        if pd.isna(trend_sma) or close <= trend_sma:
+                            continue
+
+                r_val = abs(sr.entry_level - sr.stop_level)
                 if pd.isna(atr_14) or atr_14 <= 0 or r_val < min_r_atr_mult * atr_14:
                     continue
                 if quality_filter and tr is not None and sma_tr_20 is not None and pd.notna(sma_tr_20) and sma_tr_20 > 0:
@@ -359,7 +460,10 @@ def run_live_loop(
                 if qty_btc <= 0:
                     break
                 try:
-                    broker.market_buy(qty_btc)
+                    if is_short:
+                        broker.market_sell(qty_btc)
+                    else:
+                        broker.market_buy(qty_btc)
                     state["balance_usdt"] = broker.get_balance_usdt()
                     state["position"] = {
                         "entry_time": bar_ts_str,
@@ -379,14 +483,14 @@ def run_live_loop(
                     }
                     state["entered_ranges"] = list(entered_ranges) + [ri]
                     _save_state(state)
-                    notify_position_opened(close, sr.stop_level, qty_btc, symbol=symbol_label)
-                    log.info("ENTRADA LONG: qty=%s @ ~%s, stop=%s, balance=%.2f", qty_btc, close, sr.stop_level, state["balance_usdt"])
+                    notify_position_opened(close, sr.stop_level, qty_btc, symbol=f"{symbol_label} {dir_label}")
+                    log.info("ENTRADA %s: qty=%s @ ~%s, stop=%s, balance=%.2f", dir_label, qty_btc, close, sr.stop_level, state["balance_usdt"])
                 except Exception as e:
-                    log.exception("Error al abrir posición: %s", e)
+                    log.exception("Error al abrir posición %s: %s", dir_label, e)
                 break
 
             if state.get("position") is None and position is None:
-                log.info("Sin señal de entrada en esta vela. Balance: %.2f USDT. Esperando próxima vela...", equity)
+                log.info("%s Sin señal de entrada en esta vela. Balance: %.2f USDT. Esperando próxima vela...", dir_label, equity)
             _save_state(state)
         except KeyboardInterrupt:
             log.info("Paper live detenido por el usuario")

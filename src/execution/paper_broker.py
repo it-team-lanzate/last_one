@@ -26,10 +26,14 @@ def size_position(
     capital: float,
     entry_fill: float,
     stop: float,
+    direction: str = "long",
 ) -> float:
-    """qty = risk_usd / (entry_fill - stop). risk_usd = capital * risk_pct."""
+    """qty = risk_usd / r_dist. LONG: r_dist = entry - stop. SHORT: r_dist = stop - entry."""
     risk_usd = capital * risk_pct
-    r_dist = entry_fill - stop
+    if direction == "short":
+        r_dist = stop - entry_fill
+    else:
+        r_dist = entry_fill - stop
     if r_dist <= 0:
         return 0.0
     return risk_usd / r_dist
@@ -102,30 +106,93 @@ class PaperBroker:
         )
         return self.portfolio.position
 
-    def close_long(
+    def open_position_any(
+        self,
+        bar: pd.Series,
+        entry_level: float,
+        stop: float,
+        entry_bar_idx: int,
+        chandelier_lookback: int,
+        chandelier_atr_mult: float,
+        time_stop_bars: int,
+        time_stop_min_r: float,
+        direction: str = "long",
+    ) -> "Position | None":
+        """Open LONG or SHORT position based on direction."""
+        if not self.can_open():
+            return None
+        entry_fill, _, fee_entry, _ = apply_fees_slippage(
+            entry_level, entry_level, 1.0, self.fee_params
+        )
+        capital = self.portfolio.initial_capital if self.risk_use_initial_capital else self.portfolio.equity
+        qty = size_position(self.risk_pct, capital, entry_fill, stop, direction)
+        if qty <= 0:
+            return None
+        _, _, fee_e, _ = apply_fees_slippage(entry_fill, entry_fill, qty, self.fee_params)
+        cost = entry_fill * qty + fee_e
+        if cost > self.portfolio.cash:
+            return None
+        self.portfolio.cash -= cost
+        if direction == "short":
+            r_value = stop - entry_fill
+        else:
+            r_value = entry_fill - stop
+        self.portfolio.open_position(
+            entry_time=bar["open_time"],
+            entry_fill=entry_fill,
+            stop=stop,
+            qty=qty,
+            tp1_level=entry_level,  # not used directly; engine computes TP1
+            chandelier_lookback=chandelier_lookback,
+            chandelier_atr_mult=chandelier_atr_mult,
+            time_stop_bars=time_stop_bars,
+            time_stop_min_r=time_stop_min_r,
+            entry_bar_idx=entry_bar_idx,
+        )
+        if self.portfolio.position:
+            self.portfolio.position.r_value = r_value
+        return self.portfolio.position
+
+    def close_position_any(
         self,
         bar: pd.Series,
         exit_price: float,
+        direction: str = "long",
     ) -> tuple[float, float, float]:
-        """Returns (pnl_net, fee_exit, exit_fill). Al cerrar sumamos ingresos (exit_fill*qty - fee_exit) a cash."""
+        """Close LONG or SHORT. Returns (pnl_net, fee_exit, exit_fill)."""
         pos = self.portfolio.position
         if pos is None:
             return 0.0, 0.0, exit_price
         entry_fill, exit_fill, fee_entry, fee_exit = apply_fees_slippage(
             pos.entry_fill, exit_price, pos.qty, self.fee_params
         )
-        proceeds = exit_fill * pos.qty - fee_exit
-        pnl_net = (exit_fill - entry_fill) * pos.qty - fee_entry - fee_exit
+        if direction == "short":
+            pnl_net = (entry_fill - exit_fill) * pos.qty - fee_entry - fee_exit
+            proceeds = pos.entry_fill * pos.qty + pnl_net
+        else:
+            pnl_net = (exit_fill - entry_fill) * pos.qty - fee_entry - fee_exit
+            proceeds = exit_fill * pos.qty - fee_exit
         is_win = pnl_net > 0
         self.portfolio.close_position(proceeds, is_win)
         return pnl_net, fee_exit, exit_fill
 
-    def reduce_position(self, close_qty: float, exit_price: float, fee_exit: float) -> float:
-        """Partial close (e.g. TP1 50%). Returns pnl_net for the closed part."""
+    def close_long(
+        self,
+        bar: pd.Series,
+        exit_price: float,
+    ) -> tuple[float, float, float]:
+        """Backwards-compatible: close LONG."""
+        return self.close_position_any(bar, exit_price, "long")
+
+    def reduce_position(self, close_qty: float, exit_price: float, fee_exit: float, direction: str = "long") -> float:
+        """Partial close (e.g. TP1). Returns pnl_net for the closed part."""
         pos = self.portfolio.position
         if pos is None or close_qty <= 0 or close_qty >= pos.qty:
             return 0.0
-        pnl_net = (exit_price - pos.entry_fill) * close_qty - fee_exit
+        if direction == "short":
+            pnl_net = (pos.entry_fill - exit_price) * close_qty - fee_exit
+        else:
+            pnl_net = (exit_price - pos.entry_fill) * close_qty - fee_exit
         self.portfolio.cash += pnl_net + pos.entry_fill * close_qty
         pos.qty -= close_qty
         pos.tp1_done = True

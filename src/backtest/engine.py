@@ -1,8 +1,7 @@
 """
-Event-driven backtest engine: Squeeze Breakout LONG-only.
-Entry: buy-stop at range_high + 0.10*ATR. Optional quality filter.
-Stop: min(range_low - 0.10*ATR, entry - 1.5*ATR).
-TP1: +1R close 50%. Rest: Chandelier trail. Time stop: 6 bars no +0.5R -> close.
+Event-driven backtest engine: Squeeze Breakout LONG / SHORT.
+LONG: buy-stop at range_high + ATR offset. SHORT: sell-stop at range_low - ATR offset.
+TP1: ±1R close parcial. Rest: Chandelier trail. Time stop: N bars sin min_r -> close.
 """
 from dataclasses import dataclass, field
 from enum import Enum
@@ -62,12 +61,18 @@ class BacktestResult:
     n_bars: int = 0
 
 
-def _tp1_level(entry_fill: float, r_value: float, tp1_r: float) -> float:
+def _tp1_level(entry_fill: float, r_value: float, tp1_r: float, direction: str = "long") -> float:
+    if direction == "short":
+        return entry_fill - tp1_r * r_value
     return entry_fill + tp1_r * r_value
 
 
-def _chandelier_trail(high_22: float, atr_14: float, mult: float) -> float:
+def _chandelier_trail_long(high_22: float, atr_14: float, mult: float) -> float:
     return high_22 - mult * atr_14
+
+
+def _chandelier_trail_short(low_22: float, atr_14: float, mult: float) -> float:
+    return low_22 + mult * atr_14
 
 
 def run_backtest(
@@ -95,19 +100,24 @@ def run_backtest(
     time_stop_bars = strat.get("time_stop_bars", 6)
     time_stop_min_r = strat.get("time_stop_min_r", 0.5)
 
+    direction = strat.get("direction", "long")
+    is_short = direction == "short"
+
     df = compute_signals(df, config)
     ranges: list[SqueezeRange] = df.attrs.get("squeeze_ranges", [])
     if "atr_14" not in df.columns:
         raise ValueError("compute_signals must add atr_14")
-    df["high_22"] = df["high"].rolling(chandelier_lookback).max()
+
+    if is_short:
+        df["low_22"] = df["low"].rolling(chandelier_lookback).min()
+    else:
+        df["high_22"] = df["high"].rolling(chandelier_lookback).max()
+
     if trend_filter and "trend_sma" not in df.columns:
         df["trend_sma"] = df["close"].rolling(trend_period).mean()
 
     broker = PaperBroker(config, initial_capital)
     trades: list[Trade] = []
-    # Index of next range to consider for entry (ranges that have ended)
-    next_range_idx = 0
-    # Bars since squeeze end to consider this range "active" for buy-stop (we only enter once per range)
     entered_ranges: set[int] = set()
 
     for i in range(len(df)):
@@ -117,7 +127,7 @@ def run_backtest(
         low = bar["low"]
         close = bar["close"]
         atr_14 = bar["atr_14"]
-        high_22 = bar["high_22"]
+        chandelier_ref = bar.get("low_22") if is_short else bar.get("high_22")
         tr = bar.get("tr")
         sma_tr_20 = bar.get("sma_tr_20")
 
@@ -127,146 +137,166 @@ def run_backtest(
 
         if pos is not None:
             pos.bars_in_trade += 1
-            # Breakeven: after +0.5R move stop to entry so we don't give back profit
-            current_r = (close - pos.entry_fill) / pos.r_value if pos.r_value else 0
-            if current_r >= 0.5 and pos.stop < pos.entry_fill:
-                pos.stop = pos.entry_fill
-            # --- In position: check exit order ---
-            # 1) Stop
-            if low <= pos.stop:
+
+            # Current R: SHORT = (entry - close) / r_value; LONG = (close - entry) / r_value
+            if is_short:
+                current_r = (pos.entry_fill - close) / pos.r_value if pos.r_value else 0
+            else:
+                current_r = (close - pos.entry_fill) / pos.r_value if pos.r_value else 0
+
+            # Breakeven: after +0.5R move stop to entry
+            if is_short:
+                if current_r >= 0.5 and pos.stop > pos.entry_fill:
+                    pos.stop = pos.entry_fill
+            else:
+                if current_r >= 0.5 and pos.stop < pos.entry_fill:
+                    pos.stop = pos.entry_fill
+
+            # --- 1) Stop ---
+            stop_hit = (high >= pos.stop) if is_short else (low <= pos.stop)
+            if stop_hit:
                 exit_price = pos.stop
-                pnl, fee_exit, exit_fill = broker.close_long(bar, exit_price)
-                r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
+                pnl, fee_exit, exit_fill = broker.close_position_any(bar, exit_price, direction)
+                if is_short:
+                    r_realized = (pos.entry_fill - exit_fill) / pos.r_value if pos.r_value else 0
+                else:
+                    r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
                 trades.append(
                     Trade(
-                        entry_time=pos.entry_time,
-                        exit_time=ts,
-                        entry_fill=pos.entry_fill,
-                        exit_fill=exit_fill,
-                        qty=pos.qty,
-                        r_value=pos.r_value,
-                        r_realized=r_realized,
-                        fee_entry=0,
-                        fee_exit=fee_exit,
-                        slippage_entry=0,
-                        slippage_exit=0,
+                        entry_time=pos.entry_time, exit_time=ts,
+                        entry_fill=pos.entry_fill, exit_fill=exit_fill,
+                        qty=pos.qty, r_value=pos.r_value, r_realized=r_realized,
+                        fee_entry=0, fee_exit=fee_exit, slippage_entry=0, slippage_exit=0,
                         exit_reason=ExitReason.STOP_HIT.value,
-                        pnl=pnl + fee_exit,
-                        pnl_net=pnl,
+                        pnl=pnl + fee_exit, pnl_net=pnl,
                     )
                 )
                 continue
-            # 2) TP1 (partial): high >= tp1_level and not tp1_done
-            tp1_level = _tp1_level(pos.entry_fill, pos.r_value, tp1_r)
-            if not pos.tp1_done and high >= tp1_level:
+
+            # --- 2) TP1 (partial) ---
+            tp1_level = _tp1_level(pos.entry_fill, pos.r_value, tp1_r, direction)
+            tp1_hit = (low <= tp1_level) if is_short else (high >= tp1_level)
+            if not pos.tp1_done and tp1_hit:
                 close_qty = pos.qty * tp1_close_pct
                 _, _, fee_tp1, _ = apply_fees_slippage(
                     pos.entry_fill, tp1_level, close_qty, broker.fee_params
                 )
-                pnl_tp1 = broker.reduce_position(close_qty, tp1_level, fee_tp1)
+                pnl_tp1 = broker.reduce_position(close_qty, tp1_level, fee_tp1, direction)
                 trades.append(
                     Trade(
-                        entry_time=pos.entry_time,
-                        exit_time=ts,
-                        entry_fill=pos.entry_fill,
-                        exit_fill=tp1_level,
-                        qty=close_qty,
-                        r_value=pos.r_value,
-                        r_realized=tp1_r,
-                        fee_entry=0,
-                        fee_exit=fee_tp1,
-                        slippage_entry=0,
-                        slippage_exit=0,
+                        entry_time=pos.entry_time, exit_time=ts,
+                        entry_fill=pos.entry_fill, exit_fill=tp1_level,
+                        qty=close_qty, r_value=pos.r_value, r_realized=tp1_r,
+                        fee_entry=0, fee_exit=fee_tp1, slippage_entry=0, slippage_exit=0,
                         exit_reason=ExitReason.TP1.value,
-                        pnl=pnl_tp1 + fee_tp1,
-                        pnl_net=pnl_tp1,
+                        pnl=pnl_tp1 + fee_tp1, pnl_net=pnl_tp1,
                     )
                 )
                 continue
-            # 3) Chandelier trail (only active after +trail_activation_r to avoid cutting small winners)
-            current_r_pos = (close - pos.entry_fill) / pos.r_value if pos.r_value else 0
-            if pd.notna(high_22) and pd.notna(atr_14) and current_r_pos >= trail_activation_r:
-                trail = _chandelier_trail(high_22, atr_14, chandelier_atr_mult)
-                if close < trail:
-                    exit_price = max(close, pos.stop)
-                    pnl, fee_exit, exit_fill = broker.close_long(bar, exit_price)
-                    r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
+
+            # --- 3) Chandelier trail ---
+            if pd.notna(chandelier_ref) and pd.notna(atr_14) and current_r >= trail_activation_r:
+                if is_short:
+                    trail = _chandelier_trail_short(chandelier_ref, atr_14, chandelier_atr_mult)
+                    trail_exit = close > trail
+                else:
+                    trail = _chandelier_trail_long(chandelier_ref, atr_14, chandelier_atr_mult)
+                    trail_exit = close < trail
+
+                if trail_exit:
+                    if is_short:
+                        exit_price = min(close, pos.stop)
+                    else:
+                        exit_price = max(close, pos.stop)
+                    pnl, fee_exit, exit_fill = broker.close_position_any(bar, exit_price, direction)
+                    if is_short:
+                        r_realized = (pos.entry_fill - exit_fill) / pos.r_value if pos.r_value else 0
+                    else:
+                        r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
                     trades.append(
                         Trade(
-                            entry_time=pos.entry_time,
-                            exit_time=ts,
-                            entry_fill=pos.entry_fill,
-                            exit_fill=exit_fill,
-                            qty=pos.qty,
-                            r_value=pos.r_value,
-                            r_realized=r_realized,
-                            fee_entry=0,
-                            fee_exit=fee_exit,
-                            slippage_entry=0,
-                            slippage_exit=0,
+                            entry_time=pos.entry_time, exit_time=ts,
+                            entry_fill=pos.entry_fill, exit_fill=exit_fill,
+                            qty=pos.qty, r_value=pos.r_value, r_realized=r_realized,
+                            fee_entry=0, fee_exit=fee_exit, slippage_entry=0, slippage_exit=0,
                             exit_reason=ExitReason.TRAIL.value,
-                            pnl=pnl + fee_exit,
-                            pnl_net=pnl,
+                            pnl=pnl + fee_exit, pnl_net=pnl,
                         )
                     )
                     continue
-            # 4) Time stop
+
+            # --- 4) Time stop ---
             if pos.bars_in_trade >= time_stop_bars:
-                current_r = (close - pos.entry_fill) / pos.r_value if pos.r_value else 0
                 if current_r < time_stop_min_r:
-                    exit_price = max(close, pos.stop)
-                    pnl, fee_exit, exit_fill = broker.close_long(bar, exit_price)
-                    r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
+                    if is_short:
+                        exit_price = min(close, pos.stop)
+                    else:
+                        exit_price = max(close, pos.stop)
+                    pnl, fee_exit, exit_fill = broker.close_position_any(bar, exit_price, direction)
+                    if is_short:
+                        r_realized = (pos.entry_fill - exit_fill) / pos.r_value if pos.r_value else 0
+                    else:
+                        r_realized = (exit_fill - pos.entry_fill) / pos.r_value if pos.r_value else 0
                     trades.append(
                         Trade(
-                            entry_time=pos.entry_time,
-                            exit_time=ts,
-                            entry_fill=pos.entry_fill,
-                            exit_fill=exit_fill,
-                            qty=pos.qty,
-                            r_value=pos.r_value,
-                            r_realized=r_realized,
-                            fee_entry=0,
-                            fee_exit=fee_exit,
-                            slippage_entry=0,
-                            slippage_exit=0,
+                            entry_time=pos.entry_time, exit_time=ts,
+                            entry_fill=pos.entry_fill, exit_fill=exit_fill,
+                            qty=pos.qty, r_value=pos.r_value, r_realized=r_realized,
+                            fee_entry=0, fee_exit=fee_exit, slippage_entry=0, slippage_exit=0,
                             exit_reason=ExitReason.TIME_STOP.value,
-                            pnl=pnl + fee_exit,
-                            pnl_net=pnl,
+                            pnl=pnl + fee_exit, pnl_net=pnl,
                         )
                     )
                     continue
             continue
+
         # --- No position: check entry ---
         for ri, sr in enumerate(ranges):
             if sr.end_idx >= i:
                 break
             if ri in entered_ranges:
                 continue
-            if high < sr.entry_level:
-                continue
-            if entry_require_close_above and close <= sr.entry_level:
-                continue
+
+            # Entry trigger: SHORT = low < entry_level; LONG = high > entry_level
+            if is_short:
+                if low > sr.entry_level:
+                    continue
+                if entry_require_close_above and close >= sr.entry_level:
+                    continue
+            else:
+                if high < sr.entry_level:
+                    continue
+                if entry_require_close_above and close <= sr.entry_level:
+                    continue
+
+            # Trend filter: SHORT = close < trend_sma; LONG = close > trend_sma
             if trend_filter and "trend_sma" in df.columns:
                 trend_sma = bar.get("trend_sma")
-                if pd.isna(trend_sma) or close <= trend_sma:
-                    continue
-            r_val = sr.entry_level - sr.stop_level
+                if is_short:
+                    if pd.isna(trend_sma) or close >= trend_sma:
+                        continue
+                else:
+                    if pd.isna(trend_sma) or close <= trend_sma:
+                        continue
+
+            # R value: SHORT = stop - entry; LONG = entry - stop
+            r_val = abs(sr.entry_level - sr.stop_level)
             if atr_14 and pd.notna(atr_14) and atr_14 > 0 and r_val < min_r_atr_mult * atr_14:
                 continue
             if quality_filter and tr is not None and sma_tr_20 is not None and pd.notna(sma_tr_20) and sma_tr_20 > 0:
                 if tr <= 1.1 * sma_tr_20:
                     continue
-            pos = broker.open_long(
+
+            pos = broker.open_position_any(
                 bar=bar,
                 entry_level=sr.entry_level,
                 stop=sr.stop_level,
-                tp1_level=sr.entry_level + (sr.entry_level - sr.stop_level),
                 entry_bar_idx=i,
                 chandelier_lookback=chandelier_lookback,
                 chandelier_atr_mult=chandelier_atr_mult,
                 time_stop_bars=time_stop_bars,
                 time_stop_min_r=time_stop_min_r,
+                direction=direction,
             )
             if pos is not None:
                 entered_ranges.add(ri)

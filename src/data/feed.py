@@ -1,4 +1,5 @@
 """Feed: get OHLCV from cache or download and cache."""
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -6,6 +7,7 @@ import pandas as pd
 from .cache import cache_ohlcv, get_cached_ohlcv
 from .downloader import download_ohlcv_range
 
+log = logging.getLogger(__name__)
 DEFAULT_CACHE_DIR = Path("data/cache")
 
 
@@ -36,12 +38,16 @@ def get_ohlcv_feed(
         if cached is not None and not cached.empty:
             return cached
     ccxt_symbol = _symbol_ccxt(symbol)
-    df = download_ohlcv_range(
-        symbol=ccxt_symbol,
-        timeframe=timeframe,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    try:
+        df = download_ohlcv_range(
+            symbol=ccxt_symbol,
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as e:
+        log.error("get_ohlcv_feed: error descargando OHLCV: %s", e)
+        raise
     if df.empty:
         return df
     if use_cache and start_date and end_date:

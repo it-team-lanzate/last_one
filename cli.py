@@ -125,6 +125,12 @@ def cmd_weekly_report(args: argparse.Namespace) -> None:
         log.warning("No se pudo enviar (revisa TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en .env)")
 
 
+def cmd_telegram_bot(args: argparse.Namespace) -> None:
+    """Inicia el bot de Telegram para monitoreo remoto."""
+    from src.notifications.telegram_bot import run_bot
+    run_bot()
+
+
 def cmd_paper_live(args: argparse.Namespace) -> None:
     """Paper-trade: con --execute coloca órdenes reales en Bybit Testnet; sin él, backtest hasta hoy."""
     if getattr(args, "execute", False):
@@ -200,6 +206,9 @@ def main() -> None:
     _add_common(p_weekly)
     p_weekly.add_argument("--state", default=None, help="Ruta a paper_live_state.json (default: data/paper_live_state.json)")
     p_weekly.set_defaults(func=cmd_weekly_report)
+
+    p_tgbot = sub.add_parser("telegram-bot", help="Inicia bot de Telegram para monitoreo remoto (/status /trades /equity)")
+    p_tgbot.set_defaults(func=cmd_telegram_bot)
 
     args = parser.parse_args()
     setup_logging(level=args.log_level, log_dir=args.log_dir)

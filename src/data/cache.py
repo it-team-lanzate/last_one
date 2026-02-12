@@ -42,10 +42,17 @@ def cache_ohlcv(
     start_date: str,
     end_date: str,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
-) -> Path:
+) -> Path | None:
+    """Guarda OHLCV en Parquet. Retorna path si OK, None si falla."""
+    import logging
+    log = logging.getLogger(__name__)
     path = _cache_path(
         Path(cache_dir), symbol, timeframe, start_date, end_date
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
-    return path
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(path, index=False)
+        return path
+    except Exception as e:
+        log.warning("No se pudo guardar cache OHLCV en %s: %s", path, e)
+        return None

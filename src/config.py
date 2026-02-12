@@ -22,8 +22,11 @@ def load_config(path: str | Path) -> dict[str, Any]:
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Config not found: {path}")
-    with open(path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+    except yaml.YAMLError as e:
+        raise ValueError(f"Config YAML inválido en {path}: {e}") from e
     if "extends" in data:
         extends_path = path.parent / data.pop("extends")
         base = load_config(extends_path)

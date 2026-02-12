@@ -18,6 +18,7 @@ htmlcov/
 # Datos y cache (regenerables)
 data/cache/*.parquet
 data/*.db
+data/paper_live_state*.json
 
 # IDE / OS
 .idea/

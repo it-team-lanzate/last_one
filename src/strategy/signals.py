@@ -88,6 +88,7 @@ def compute_signals(
         squeeze_width_ratio=float(strat.get("squeeze_width_ratio", 1.5)),
         squeeze_percentile_max=strat.get("squeeze_percentile_max"),
         squeeze_percentile_lookback=int(strat.get("squeeze_percentile_lookback", 100)),
+        direction=strat.get("direction", "long"),
     )
 
     out = df.copy()

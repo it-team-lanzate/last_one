@@ -1,11 +1,13 @@
 """SQLite persistence: runs, trades, equity snapshots, wf_windows."""
 import json
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+log = logging.getLogger(__name__)
 DEFAULT_DB_PATH = Path("data/trading.db")
 
 
@@ -18,7 +20,8 @@ def _get_conn(db_path: Path | str) -> sqlite3.Connection:
 def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
     conn = _get_conn(db_path)
     try:
-        conn.executescript("""
+        try:
+            conn.executescript("""
         CREATE TABLE IF NOT EXISTS runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tipo TEXT NOT NULL,
@@ -68,7 +71,10 @@ def init_db(db_path: Path | str = DEFAULT_DB_PATH) -> None:
             FOREIGN KEY (run_id) REFERENCES runs(id)
         );
         """)
-        conn.commit()
+            conn.commit()
+        except sqlite3.Error as e:
+            log.error("init_db error: %s", e)
+            raise
     finally:
         conn.close()
 
@@ -85,20 +91,24 @@ def save_run(
 ) -> int:
     conn = _get_conn(db_path)
     try:
-        params_json = json.dumps(params)
-        if run_id is not None:
-            conn.execute(
-                "INSERT INTO runs (id, tipo, start_date, end_date, params, seed, version) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (run_id, tipo, start_date, end_date, params_json, seed, version),
+        try:
+            params_json = json.dumps(params)
+            if run_id is not None:
+                conn.execute(
+                    "INSERT INTO runs (id, tipo, start_date, end_date, params, seed, version) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (run_id, tipo, start_date, end_date, params_json, seed, version),
+                )
+                conn.commit()
+                return run_id
+            cur = conn.execute(
+                "INSERT INTO runs (tipo, start_date, end_date, params, seed, version) VALUES (?, ?, ?, ?, ?, ?)",
+                (tipo, start_date, end_date, params_json, seed, version),
             )
             conn.commit()
-            return run_id
-        cur = conn.execute(
-            "INSERT INTO runs (tipo, start_date, end_date, params, seed, version) VALUES (?, ?, ?, ?, ?, ?)",
-            (tipo, start_date, end_date, params_json, seed, version),
-        )
-        conn.commit()
-        return cur.lastrowid or 0
+            return cur.lastrowid or 0
+        except sqlite3.Error as e:
+            log.error("save_run error: %s", e)
+            raise
     finally:
         conn.close()
 
@@ -119,8 +129,9 @@ def save_trades(
 ) -> None:
     conn = _get_conn(db_path)
     try:
-        for t in trades:
-            conn.execute(
+        try:
+            for t in trades:
+                conn.execute(
                 """INSERT INTO trades (run_id, entry_time, exit_time, entry_fill, exit_fill, qty, r_value, r_realized,
                    fee_entry, fee_exit, slippage_entry, slippage_exit, exit_reason, pnl, pnl_net)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -142,7 +153,10 @@ def save_trades(
                     _trade_val(t, "pnl_net"),
                 ),
             )
-        conn.commit()
+            conn.commit()
+        except sqlite3.Error as e:
+            log.error("save_trades error (run_id=%s): %s", run_id, e)
+            raise
     finally:
         conn.close()
 
@@ -154,13 +168,17 @@ def save_equity(
 ) -> None:
     conn = _get_conn(db_path)
     try:
-        for ts, eq in equity_curve:
-            ts_str = str(ts) if hasattr(ts, "isoformat") else str(ts)
-            conn.execute(
-                "INSERT INTO equity (run_id, ts, equity) VALUES (?, ?, ?)",
-                (run_id, ts_str, eq),
-            )
-        conn.commit()
+        try:
+            for ts, eq in equity_curve:
+                ts_str = str(ts) if hasattr(ts, "isoformat") else str(ts)
+                conn.execute(
+                    "INSERT INTO equity (run_id, ts, equity) VALUES (?, ?, ?)",
+                    (run_id, ts_str, eq),
+                )
+            conn.commit()
+        except sqlite3.Error as e:
+            log.error("save_equity error (run_id=%s): %s", run_id, e)
+            raise
     finally:
         conn.close()
 
@@ -178,12 +196,16 @@ def save_wf_window(
 ) -> None:
     conn = _get_conn(db_path)
     try:
-        conn.execute(
+        try:
+            conn.execute(
             """INSERT INTO wf_windows (run_id, window_start, window_end, n_trades, total_return_pct, profit_factor, max_drawdown_pct, win_rate)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, window_start, window_end, n_trades, total_return_pct, profit_factor, max_drawdown_pct, win_rate),
         )
-        conn.commit()
+            conn.commit()
+        except sqlite3.Error as e:
+            log.error("save_wf_window error (run_id=%s): %s", run_id, e)
+            raise
     finally:
         conn.close()
 
