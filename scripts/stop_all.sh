@@ -3,8 +3,9 @@
 # Uso: ./scripts/stop_all.sh
 
 for name in long short tgbot dashboard; do
-    if screen -ls | grep -q "\.$name "; then
-        screen -S "$name" -X quit
+    session=$(screen -ls 2>/dev/null | grep -E "\.$name[[:space:]]" | head -1 | awk '{print $1}')
+    if [ -n "$session" ]; then
+        screen -S "$session" -X quit
         echo "  $name: detenido"
     else
         echo "  $name: no estaba corriendo"
