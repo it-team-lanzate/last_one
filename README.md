@@ -152,6 +152,11 @@ Para ejecutar ambas estrategias en un VPS con monitoreo remoto:
 source venv/bin/activate
 python cli.py fetch-data --end-date today
 
+# Opción A: script automático (recomendado)
+chmod +x scripts/start_all.sh scripts/stop_all.sh
+./scripts/start_all.sh   # inicia LONG, SHORT, tgbot, dashboard
+
+# Opción B: manual (cada proceso en su propia sesión screen)
 # 2. Sesión screen para LONG
 screen -S long
 source venv/bin/activate
@@ -183,6 +188,9 @@ screen -ls
 
 # Volver a una sesión
 screen -r long    # o short, tgbot, dashboard
+
+# Detener todos los procesos
+./scripts/stop_all.sh
 ```
 
 **Firewall** (si quieres ver el dashboard desde fuera):
