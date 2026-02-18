@@ -163,8 +163,10 @@ def page_live_monitor() -> None:
 
     with col1:
         st.subheader("LONG")
-        emoji, label = _heartbeat_status(state_long.get("last_heartbeat"))
+        emoji, label, sub = _heartbeat_status(state_long.get("last_heartbeat"), state_long.get("started_at"))
         st.metric("Estado", f"{emoji} {label}")
+        if sub:
+            st.caption(sub)
         st.caption(f"Última vela: {_to_ar(state_long.get('last_candle_time'))}")
         pos = state_long.get("position")
         if pos:
