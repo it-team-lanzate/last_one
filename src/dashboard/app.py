@@ -66,6 +66,24 @@ def _heartbeat_status(heartbeat_str: str | None) -> tuple[str, str]:
     return "🟡", f"Stale ({mins:.0f} min)"
 
 
+def _load_last_bars(symbol: str = "BTCUSDT", timeframe: str = "4h", days: int = 30) -> pd.DataFrame:
+    """Carga las últimas N días de OHLCV para el gráfico."""
+    try:
+        from src.data.feed import get_ohlcv_feed
+        end = datetime.utcnow()
+        start = end - timedelta(days=days)
+        df = get_ohlcv_feed(
+            symbol=symbol,
+            timeframe=timeframe,
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            use_cache=True,
+        )
+        return df if df is not None and not df.empty else pd.DataFrame()
+    except Exception:
+        return pd.DataFrame()
+
+
 def page_live_monitor() -> None:
     st.title("Live Monitor")
     st.caption("Estado de los runners LONG y SHORT en paper-live (Bybit Testnet)")
@@ -78,6 +96,29 @@ def page_live_monitor() -> None:
 
     state_long = _load_live_state(STATE_LONG)
     state_short = _load_live_state(STATE_SHORT)
+
+    # --- Resumen estado de cuenta ---
+    st.subheader("Resumen estado de cuenta")
+    bal_long = state_long.get("balance_usdt")
+    bal_short = state_short.get("balance_usdt")
+    bal = bal_long if bal_long is not None else bal_short
+    if bal is not None:
+        bal = float(bal)
+    pnl_long = sum(t.get("pnl_net", 0) for t in state_long.get("closed_trades", []))
+    pnl_short = sum(t.get("pnl_net", 0) for t in state_short.get("closed_trades", []))
+    initial = 10000.0
+    ret_pct = ((bal - initial) / initial * 100) if bal is not None else 0
+
+    acc1, acc2, acc3, acc4 = st.columns(4)
+    with acc1:
+        st.metric("Balance", f"{bal:,.2f} USDT" if bal is not None else "—")
+    with acc2:
+        st.metric("PnL LONG", f"{pnl_long:+,.2f} USDT")
+    with acc3:
+        st.metric("PnL SHORT", f"{pnl_short:+,.2f} USDT")
+    with acc4:
+        st.metric("Retorno total", f"{ret_pct:+.2f}%")
+    st.divider()
 
     col1, col2 = st.columns(2)
 
@@ -132,6 +173,51 @@ def page_live_monitor() -> None:
                 pnl = t.get("pnl_net", 0)
                 sym = "✅" if pnl > 0 else "❌"
                 st.text(f"{sym} {t.get('exit_time','?')[:16]} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
+
+    # --- Gráfico últimas barras ---
+    st.divider()
+    st.subheader("Últimas velas 4H (BTCUSDT)")
+    df_ohlcv = _load_last_bars(days=30)
+    if not df_ohlcv.empty:
+        df_ohlcv = df_ohlcv.tail(150)  # últimas 150 barras (~25 días)
+        fig = go.Figure(data=[
+            go.Candlestick(
+                x=df_ohlcv["open_time"],
+                open=df_ohlcv["open"],
+                high=df_ohlcv["high"],
+                low=df_ohlcv["low"],
+                close=df_ohlcv["close"],
+                name="BTC",
+            )
+        ])
+        # Marcadores de entrada si hay posición abierta
+        for name, state, color, sym in [("LONG", state_long, "green", "triangle-up"), ("SHORT", state_short, "red", "triangle-down")]:
+            pos = state.get("position")
+            if pos:
+                entry = float(pos.get("entry_price", 0))
+                entry_ts = pos.get("entry_time")
+                if entry_ts and entry > 0:
+                    try:
+                        entry_dt = pd.to_datetime(entry_ts)
+                        fig.add_trace(
+                            go.Scatter(
+                                x=[entry_dt],
+                                y=[entry],
+                                mode="markers",
+                                name=f"{name} entry",
+                                marker=dict(symbol=sym, size=14, color=color, line=dict(width=2, color="white")),
+                            )
+                        )
+                    except Exception:
+                        pass
+        fig.update_layout(
+            xaxis_rangeslider_visible=False,
+            height=400,
+            title="Precio BTCUSDT 4H",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sin datos OHLCV. Ejecuta `python cli.py fetch-data --end-date today` para cargar velas.")
 
     st.divider()
     total_long = sum(t.get("pnl_net", 0) for t in state_long.get("closed_trades", []))
