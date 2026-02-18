@@ -1,12 +1,15 @@
 """
 Streamlit dashboard: Live Monitor, Runs list, Run detail, Walk-forward.
-Uses Plotly for interactive charts.
+Uses Plotly for interactive charts. Fechas en hora Argentina (UTC-3).
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
+
+TZ_AR = ZoneInfo("America/Argentina/Buenos_Aires")
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -40,6 +43,32 @@ init_db(DB_PATH)
 STALE_MINUTES = 6  # Si last_heartbeat > 6 min → runner probablemente caído
 
 
+def _to_ar(ts) -> str:
+    """Convierte timestamp (str o datetime) a hora Argentina para display."""
+    if ts is None or (isinstance(ts, str) and ts in ("", "?", "—")):
+        return "—"
+    try:
+        if isinstance(ts, str):
+            dt = pd.to_datetime(ts)
+        else:
+            dt = pd.Timestamp(ts)
+        if dt.tzinfo is None:
+            dt = dt.tz_localize("UTC")
+        return dt.tz_convert(TZ_AR).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return str(ts)[:19] if ts else "—"
+
+
+def _df_ts_to_ar(series: pd.Series) -> pd.Series:
+    """Convierte serie de timestamps a zona Argentina para ejes de Plotly."""
+    if series.empty:
+        return series
+    s = pd.to_datetime(series, errors="coerce")
+    if s.dt.tz is None:
+        s = s.dt.tz_localize("UTC")
+    return s.dt.tz_convert(TZ_AR)
+
+
 def _load_live_state(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -50,27 +79,34 @@ def _load_live_state(path: Path) -> dict:
         return {}
 
 
-def _heartbeat_status(heartbeat_str: str | None) -> tuple[str, str]:
-    """Retorna (emoji, label): running, stale, unknown."""
+def _heartbeat_status(heartbeat_str: str | None, started_at_str: str | None = None) -> tuple[str, str, str]:
+    """Retorna (emoji, label, caption): running/stale/unknown, texto principal, texto secundario."""
+    caption = ""
     if not heartbeat_str:
-        return "⚫", "Desconocido"
+        return "⚫", "Desconocido", ""
     try:
         ts = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
         ts_naive = ts.replace(tzinfo=None) if ts.tzinfo else ts
-        delta = datetime.utcnow() - ts_naive
+        delta = datetime.now(timezone.utc).replace(tzinfo=None) - ts_naive
         mins = delta.total_seconds() / 60
     except Exception:
-        return "⚫", "Desconocido"
+        return "⚫", "Desconocido", ""
+    if started_at_str:
+        caption = f"Activo desde {_to_ar(started_at_str)}"
     if mins < STALE_MINUTES:
-        return "🟢", f"Activo ({mins:.0f} min)"
-    return "🟡", f"Stale ({mins:.0f} min)"
+        label = caption or f"Activo (último check hace {mins:.0f} min)"
+        sub = f"Último check: hace {mins:.0f} min" if caption else ""
+        return "🟢", label, sub
+    label = f"Stale hace {mins:.0f} min"
+    sub = caption or ""
+    return "🟡", label, sub
 
 
 def _load_last_bars(symbol: str = "BTCUSDT", timeframe: str = "4h", days: int = 30) -> pd.DataFrame:
     """Carga las últimas N días de OHLCV para el gráfico."""
     try:
         from src.data.feed import get_ohlcv_feed
-        end = datetime.utcnow()
+        end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
         df = get_ohlcv_feed(
             symbol=symbol,
@@ -126,7 +162,7 @@ def page_live_monitor() -> None:
         st.subheader("LONG")
         emoji, label = _heartbeat_status(state_long.get("last_heartbeat"))
         st.metric("Estado", f"{emoji} {label}")
-        st.caption(f"Última vela: {state_long.get('last_candle_time', '—')}")
+        st.caption(f"Última vela: {_to_ar(state_long.get('last_candle_time'))}")
         pos = state_long.get("position")
         if pos:
             st.info(f"**En posición** | Entry: {float(pos.get('entry_price', 0)):,.0f} | Stop: {float(pos.get('stop', 0)):,.0f} | Qty: {float(pos.get('qty', 0)):.5f} BTC")
@@ -146,13 +182,15 @@ def page_live_monitor() -> None:
             for t in reversed(recent):
                 pnl = t.get("pnl_net", 0)
                 sym = "✅" if pnl > 0 else "❌"
-                st.text(f"{sym} {t.get('exit_time','?')[:16]} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
+                st.text(f"{sym} {_to_ar(t.get('exit_time'))} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
 
     with col2:
         st.subheader("SHORT")
-        emoji, label = _heartbeat_status(state_short.get("last_heartbeat"))
+        emoji, label, sub = _heartbeat_status(state_short.get("last_heartbeat"), state_short.get("started_at"))
         st.metric("Estado", f"{emoji} {label}")
-        st.caption(f"Última vela: {state_short.get('last_candle_time', '—')}")
+        if sub:
+            st.caption(sub)
+        st.caption(f"Última vela: {_to_ar(state_short.get('last_candle_time'))}")
         pos = state_short.get("position")
         if pos:
             st.info(f"**En posición** | Entry: {float(pos.get('entry_price', 0)):,.0f} | Stop: {float(pos.get('stop', 0)):,.0f} | Qty: {float(pos.get('qty', 0)):.5f} BTC")
@@ -172,17 +210,18 @@ def page_live_monitor() -> None:
             for t in reversed(recent):
                 pnl = t.get("pnl_net", 0)
                 sym = "✅" if pnl > 0 else "❌"
-                st.text(f"{sym} {t.get('exit_time','?')[:16]} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
+                st.text(f"{sym} {_to_ar(t.get('exit_time'))} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
 
     # --- Gráfico últimas barras ---
     st.divider()
     st.subheader("Últimas velas 4H (BTCUSDT)")
     df_ohlcv = _load_last_bars(days=30)
     if not df_ohlcv.empty:
-        df_ohlcv = df_ohlcv.tail(150)  # últimas 150 barras (~25 días)
+        df_ohlcv = df_ohlcv.tail(150).copy()  # últimas 150 barras (~25 días)
+        df_ohlcv["open_time_ar"] = _df_ts_to_ar(df_ohlcv["open_time"])
         fig = go.Figure(data=[
             go.Candlestick(
-                x=df_ohlcv["open_time"],
+                x=df_ohlcv["open_time_ar"],
                 open=df_ohlcv["open"],
                 high=df_ohlcv["high"],
                 low=df_ohlcv["low"],
@@ -199,9 +238,12 @@ def page_live_monitor() -> None:
                 if entry_ts and entry > 0:
                     try:
                         entry_dt = pd.to_datetime(entry_ts)
+                        if entry_dt.tzinfo is None:
+                            entry_dt = entry_dt.tz_localize("UTC")
+                        entry_ar = entry_dt.tz_convert(TZ_AR)
                         fig.add_trace(
                             go.Scatter(
-                                x=[entry_dt],
+                                x=[entry_ar],
                                 y=[entry],
                                 mode="markers",
                                 name=f"{name} entry",
@@ -213,9 +255,10 @@ def page_live_monitor() -> None:
         fig.update_layout(
             xaxis_rangeslider_visible=False,
             height=400,
-            title="Precio BTCUSDT 4H",
+            title="Precio BTCUSDT 4H (hora Argentina)",
+            xaxis_title="Hora (Argentina)",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
     else:
         st.info("Sin datos OHLCV. Ejecuta `python cli.py fetch-data --end-date today` para cargar velas.")
 
@@ -261,10 +304,12 @@ def page_runs() -> None:
         eq_b = get_equity(run_b, db_path=DB_PATH)
         if not eq_a.empty and not eq_b.empty:
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=eq_a["ts"], y=eq_a["equity"], name=f"Run {run_a}"))
-            fig.add_trace(go.Scatter(x=eq_b["ts"], y=eq_b["equity"], name=f"Run {run_b}"))
-            fig.update_layout(title="Equity comparison", xaxis_title="Time", yaxis_title="Equity")
-            st.plotly_chart(fig, use_container_width=True)
+            ts_a = _df_ts_to_ar(eq_a["ts"])
+            ts_b = _df_ts_to_ar(eq_b["ts"])
+            fig.add_trace(go.Scatter(x=ts_a, y=eq_a["equity"], name=f"Run {run_a}"))
+            fig.add_trace(go.Scatter(x=ts_b, y=eq_b["equity"], name=f"Run {run_b}"))
+            fig.update_layout(title="Equity comparison", xaxis_title="Hora (Argentina)", yaxis_title="Equity")
+            st.plotly_chart(fig, width='stretch')
 
 
 def page_run_detail(run_id: int) -> None:
@@ -283,21 +328,28 @@ def page_run_detail(run_id: int) -> None:
 
     equity_df = get_equity(run_id, db_path=DB_PATH)
     if not equity_df.empty:
-        equity_df = equity_df.sort_values("ts")
+        equity_df = equity_df.sort_values("ts").copy()
+        equity_df["ts_ar"] = _df_ts_to_ar(equity_df["ts"])
         eq_series = equity_df.set_index("ts")["equity"]
         peak = eq_series.expanding().max()
         dd = (peak - eq_series) / peak * 100
         fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.4],
                             subplot_titles=("Equity", "Drawdown %"))
-        fig.add_trace(go.Scatter(x=equity_df["ts"], y=equity_df["equity"], name="Equity"), row=1, col=1)
-        fig.add_trace(go.Scatter(x=equity_df["ts"], y=dd, name="Drawdown %", fill="tozeroy"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=equity_df["ts_ar"], y=equity_df["equity"], name="Equity"), row=1, col=1)
+        fig.add_trace(go.Scatter(x=equity_df["ts_ar"], y=dd, name="Drawdown %", fill="tozeroy"), row=2, col=1)
         fig.update_layout(height=500, title_text="Equity & Drawdown")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
     trades_df = get_trades(run_id, db_path=DB_PATH)
     if not trades_df.empty:
         st.subheader("Trades")
-        st.dataframe(trades_df, use_container_width=True)
+        df_display = trades_df.copy()
+        for col in ["entry_time", "exit_time"]:
+            if col in df_display.columns:
+                df_display[col] = pd.to_datetime(df_display[col]).apply(
+                    lambda x: _to_ar(x) if pd.notna(x) else ""
+                )
+        st.dataframe(df_display, use_container_width=True)
         n_wins = (trades_df["pnl_net"] > 0).sum()
         n_trades = len(trades_df)
         win_rate = n_wins / n_trades * 100 if n_trades else 0
@@ -312,13 +364,16 @@ def page_run_detail(run_id: int) -> None:
     # Price chart with entry/exit markers (if we had OHLCV we'd overlay; here we show trade times)
     if not trades_df.empty:
         st.subheader("Trade timeline (entry / exit)")
+        trades_df = trades_df.copy()
         trades_df["entry_time"] = pd.to_datetime(trades_df["entry_time"])
         trades_df["exit_time"] = pd.to_datetime(trades_df["exit_time"])
+        entry_ar = _df_ts_to_ar(trades_df["entry_time"])
+        exit_ar = _df_ts_to_ar(trades_df["exit_time"])
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=trades_df["entry_time"], y=trades_df["entry_fill"], mode="markers", name="Entry", marker=dict(symbol="triangle-up", size=12, color="green")))
-        fig.add_trace(go.Scatter(x=trades_df["exit_time"], y=trades_df["exit_fill"], mode="markers", name="Exit", marker=dict(symbol="triangle-down", size=12, color="red")))
-        fig.update_layout(title="Entry/Exit levels", xaxis_title="Time", yaxis_title="Price")
-        st.plotly_chart(fig, use_container_width=True)
+        fig.add_trace(go.Scatter(x=entry_ar, y=trades_df["entry_fill"], mode="markers", name="Entry", marker=dict(symbol="triangle-up", size=12, color="green")))
+        fig.add_trace(go.Scatter(x=exit_ar, y=trades_df["exit_fill"], mode="markers", name="Exit", marker=dict(symbol="triangle-down", size=12, color="red")))
+        fig.update_layout(title="Entry/Exit levels", xaxis_title="Hora (Argentina)", yaxis_title="Price")
+        st.plotly_chart(fig, width='stretch')
 
     if st.button("← Back to Runs"):
         st.session_state.pop("run_id", None)
@@ -348,7 +403,7 @@ def page_walk_forward() -> None:
     fig.add_trace(go.Bar(x=x, y=wf_df["max_drawdown_pct"], name="DD %"), row=2, col=1)
     fig.add_trace(go.Bar(x=x, y=wf_df["win_rate"], name="Win rate %"), row=2, col=2)
     fig.update_layout(height=500, title_text="Walk-Forward: metrics by window")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width='stretch')
 
 
 def main() -> None:

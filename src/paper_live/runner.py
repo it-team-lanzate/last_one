@@ -232,9 +232,12 @@ def run_live_loop(
     dir_label = "SHORT" if is_short else "LONG"
     log.info("Paper live %s (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", dir_label, symbol_ccxt, poll_interval_seconds)
 
+    _process_started_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+
     while True:
         try:
             state = _load_state()
+            state["started_at"] = _process_started_at
             state["last_heartbeat"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
             _save_state(state)
             if _maybe_send_weekly(state, symbol_label):
