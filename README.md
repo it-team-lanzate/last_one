@@ -155,19 +155,19 @@ python cli.py fetch-data --end-date today
 # 2. Sesión screen para LONG
 screen -S long
 source venv/bin/activate
-python cli.py paper-live --config configs/live.yaml --execute
+python cli.py paper-live --config configs/live.yaml --execute --log-dir data/logs
 # Ctrl+A, luego D para salir sin matar
 
 # 3. Sesión screen para SHORT
 screen -S short
 source venv/bin/activate
-python cli.py paper-live --config configs/live_short.yaml --execute
+python cli.py paper-live --config configs/live_short.yaml --execute --log-dir data/logs
 # Ctrl+A, luego D para salir sin matar
 
 # 4. Sesión screen para bot de Telegram
 screen -S tgbot
 source venv/bin/activate
-python cli.py telegram-bot
+python cli.py telegram-bot --log-dir data/logs
 # Ctrl+A, luego D para salir sin matar
 
 # 5. Dashboard (monitoreo web: estado, métricas, posiciones)
@@ -232,6 +232,7 @@ streamlit run src/dashboard/app.py
 ```
 
 - **Live Monitor**: estado de runners LONG/SHORT (activo/stale), posiciones, balance, últimos trades, PnL. Auto-refresh cada 60s.
+- **Logs**: últimas líneas del archivo de log (requiere `--log-dir data/logs` en paper-live y telegram-bot). Auto-refresh cada 5s.
 - **Runs**: lista de runs (backtest y walk-forward) con parámetros y métricas; comparación de 2 runs.
 - **Run detail**: equity curve + drawdown, tabla de trades, gráfico de precio con marcadores.
 - **Walk-Forward**: tabla por ventana + gráfico de métricas.

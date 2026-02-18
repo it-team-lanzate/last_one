@@ -35,9 +35,12 @@ from src.storage.models import (
 )
 
 st.set_page_config(page_title="Squeeze Breakout 4H", layout="wide")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 DB_PATH = Path("data/trading.db")
 STATE_LONG = Path("data/paper_live_state.json")
 STATE_SHORT = Path("data/paper_live_state_short.json")
+LOG_DIR = PROJECT_ROOT / "data" / "logs"
+LOG_FILE = LOG_DIR / "app.log"
 init_db(DB_PATH)
 
 STALE_MINUTES = 6  # Si last_heartbeat > 6 min → runner probablemente caído
@@ -381,6 +384,41 @@ def page_run_detail(run_id: int) -> None:
         st.rerun()
 
 
+def _tail_log(path: Path, lines: int = 200) -> str:
+    """Lee las últimas N líneas del archivo de log."""
+    if not path.exists():
+        return ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            all_lines = f.readlines()
+        return "".join(all_lines[-lines:])
+    except Exception as e:
+        return f"Error leyendo log: {e}"
+
+
+def page_logs() -> None:
+    st.title("Logs en vivo")
+    st.caption("Últimas líneas del archivo de log (paper-live, telegram-bot, etc.)")
+
+    if st_autorefresh:
+        st_autorefresh(interval=5000, key="logs")
+    else:
+        if st.button("🔄 Actualizar"):
+            st.rerun()
+
+    path = LOG_FILE
+    n_lines = st.slider("Líneas a mostrar", 50, 500, 150, key="log_lines")
+
+    content = _tail_log(path, n_lines)
+    if not content:
+        st.info(
+            "No hay logs. Para que los runners escriban a archivo, inícialos con:\n\n"
+            "`python cli.py paper-live --config configs/live.yaml --execute --log-dir data/logs`"
+        )
+    else:
+        st.code(content, language="text")
+
+
 def page_walk_forward() -> None:
     st.title("Walk-Forward")
     runs = get_runs(tipo="walk_forward", db_path=DB_PATH)
@@ -425,6 +463,8 @@ def main() -> None:
         page_walk_forward()
     elif page == "Live Monitor":
         page_live_monitor()
+    elif page == "Logs":
+        page_logs()
     else:
         page_runs()
 
