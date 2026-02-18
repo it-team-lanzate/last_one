@@ -209,6 +209,7 @@ def run_live_loop(
     direction = strat.get("direction", "long")
     is_short = direction == "short"
     quality_filter = strat.get("quality_filter", False)
+    quality_filter_tr_mult = float(strat.get("quality_filter_tr_mult", 1.1))
     entry_require_close_above = strat.get("entry_require_close_above", True)
     trend_filter = strat.get("trend_filter", True)
     trend_period = int(strat.get("trend_period", 200))
@@ -234,6 +235,8 @@ def run_live_loop(
     while True:
         try:
             state = _load_state()
+            state["last_heartbeat"] = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+            _save_state(state)
             if _maybe_send_weekly(state, symbol_label):
                 _save_state(state)
             last_candle_time = state.get("last_candle_time")
@@ -450,7 +453,7 @@ def run_live_loop(
                 if pd.isna(atr_14) or atr_14 <= 0 or r_val < min_r_atr_mult * atr_14:
                     continue
                 if quality_filter and tr is not None and sma_tr_20 is not None and pd.notna(sma_tr_20) and sma_tr_20 > 0:
-                    if tr <= 1.1 * sma_tr_20:
+                    if tr <= quality_filter_tr_mult * sma_tr_20:
                         continue
 
                 risk_usd = equity * risk_pct

@@ -1,8 +1,9 @@
 """
-Streamlit dashboard: Runs list, Run detail (equity, drawdown, trades, price + markers), Walk-forward.
+Streamlit dashboard: Live Monitor, Runs list, Run detail, Walk-forward.
 Uses Plotly for interactive charts.
 """
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,11 @@ import streamlit as st
 # Add project root to path
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+except ImportError:
+    st_autorefresh = None
 
 from src.storage.models import (
     init_db,
@@ -27,7 +33,110 @@ from src.storage.models import (
 
 st.set_page_config(page_title="Squeeze Breakout 4H", layout="wide")
 DB_PATH = Path("data/trading.db")
+STATE_LONG = Path("data/paper_live_state.json")
+STATE_SHORT = Path("data/paper_live_state_short.json")
 init_db(DB_PATH)
+
+STALE_MINUTES = 6  # Si last_heartbeat > 6 min → runner probablemente caído
+
+
+def _load_live_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _heartbeat_status(heartbeat_str: str | None) -> tuple[str, str]:
+    """Retorna (emoji, label): running, stale, unknown."""
+    if not heartbeat_str:
+        return "⚫", "Desconocido"
+    try:
+        ts = datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+        ts_naive = ts.replace(tzinfo=None) if ts.tzinfo else ts
+        delta = datetime.utcnow() - ts_naive
+        mins = delta.total_seconds() / 60
+    except Exception:
+        return "⚫", "Desconocido"
+    if mins < STALE_MINUTES:
+        return "🟢", f"Activo ({mins:.0f} min)"
+    return "🟡", f"Stale ({mins:.0f} min)"
+
+
+def page_live_monitor() -> None:
+    st.title("Live Monitor")
+    st.caption("Estado de los runners LONG y SHORT en paper-live (Bybit Testnet)")
+
+    if st_autorefresh:
+        st_autorefresh(interval=60 * 1000, key="livemonitor")
+    else:
+        if st.button("🔄 Refrescar"):
+            st.rerun()
+
+    state_long = _load_live_state(STATE_LONG)
+    state_short = _load_live_state(STATE_SHORT)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("LONG")
+        emoji, label = _heartbeat_status(state_long.get("last_heartbeat"))
+        st.metric("Estado", f"{emoji} {label}")
+        st.caption(f"Última vela: {state_long.get('last_candle_time', '—')}")
+        pos = state_long.get("position")
+        if pos:
+            st.info(f"**En posición** | Entry: {float(pos.get('entry_price', 0)):,.0f} | Stop: {float(pos.get('stop', 0)):,.0f} | Qty: {float(pos.get('qty', 0)):.5f} BTC")
+        else:
+            st.success("Sin posición")
+        bal = state_long.get("balance_usdt")
+        if bal is not None:
+            st.metric("Balance", f"{float(bal):,.2f} USDT")
+        trades = state_long.get("closed_trades", [])
+        if trades:
+            recent = trades[-10:]
+            total_pnl = sum(t.get("pnl_net", 0) for t in trades)
+            n_wins = sum(1 for t in trades if t.get("pnl_net", 0) > 0)
+            st.metric("PnL total", f"{total_pnl:,.2f} USDT")
+            st.metric("Win rate", f"{n_wins}/{len(trades)} ({n_wins/len(trades)*100:.0f}%)" if trades else "—")
+            st.caption("Últimos trades")
+            for t in reversed(recent):
+                pnl = t.get("pnl_net", 0)
+                sym = "✅" if pnl > 0 else "❌"
+                st.text(f"{sym} {t.get('exit_time','?')[:16]} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
+
+    with col2:
+        st.subheader("SHORT")
+        emoji, label = _heartbeat_status(state_short.get("last_heartbeat"))
+        st.metric("Estado", f"{emoji} {label}")
+        st.caption(f"Última vela: {state_short.get('last_candle_time', '—')}")
+        pos = state_short.get("position")
+        if pos:
+            st.info(f"**En posición** | Entry: {float(pos.get('entry_price', 0)):,.0f} | Stop: {float(pos.get('stop', 0)):,.0f} | Qty: {float(pos.get('qty', 0)):.5f} BTC")
+        else:
+            st.success("Sin posición")
+        bal = state_short.get("balance_usdt")
+        if bal is not None:
+            st.metric("Balance", f"{float(bal):,.2f} USDT")
+        trades = state_short.get("closed_trades", [])
+        if trades:
+            total_pnl = sum(t.get("pnl_net", 0) for t in trades)
+            n_wins = sum(1 for t in trades if t.get("pnl_net", 0) > 0)
+            st.metric("PnL total", f"{total_pnl:,.2f} USDT")
+            st.metric("Win rate", f"{n_wins}/{len(trades)} ({n_wins/len(trades)*100:.0f}%)" if trades else "—")
+            recent = trades[-10:]
+            st.caption("Últimos trades")
+            for t in reversed(recent):
+                pnl = t.get("pnl_net", 0)
+                sym = "✅" if pnl > 0 else "❌"
+                st.text(f"{sym} {t.get('exit_time','?')[:16]} | {pnl:+.2f} USDT | {t.get('exit_reason','')}")
+
+    st.divider()
+    total_long = sum(t.get("pnl_net", 0) for t in state_long.get("closed_trades", []))
+    total_short = sum(t.get("pnl_net", 0) for t in state_short.get("closed_trades", []))
+    st.metric("PnL combinado (LONG + SHORT)", f"{total_long + total_short:,.2f} USDT")
 
 
 def page_runs() -> None:
@@ -161,7 +270,7 @@ def main() -> None:
     if st.session_state.get("page") == "detail" and st.session_state.get("run_id") is not None:
         page_run_detail(st.session_state["run_id"])
         return
-    page = st.sidebar.radio("Page", ["Runs", "Run detail", "Walk-Forward"], index=0)
+    page = st.sidebar.radio("Page", ["Live Monitor", "Runs", "Run detail", "Walk-Forward"], index=0)
     if page == "Run detail":
         run_id = st.session_state.get("run_id")
         if run_id is not None:
@@ -173,6 +282,8 @@ def main() -> None:
                 page_run_detail(run_id)
     elif page == "Walk-Forward":
         page_walk_forward()
+    elif page == "Live Monitor":
+        page_live_monitor()
     else:
         page_runs()
 

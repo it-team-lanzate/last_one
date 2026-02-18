@@ -88,6 +88,7 @@ def run_backtest(
     bt = config.get("backtest", config.get("paper_live", {}))
     initial_capital = float(bt.get("initial_capital", 10000.0))
     quality_filter = strat.get("quality_filter", False)
+    quality_filter_tr_mult = float(strat.get("quality_filter_tr_mult", 1.1))
     entry_require_close_above = strat.get("entry_require_close_above", True)
     trend_filter = strat.get("trend_filter", True)
     trend_period = int(strat.get("trend_period", 200))
@@ -284,7 +285,7 @@ def run_backtest(
             if atr_14 and pd.notna(atr_14) and atr_14 > 0 and r_val < min_r_atr_mult * atr_14:
                 continue
             if quality_filter and tr is not None and sma_tr_20 is not None and pd.notna(sma_tr_20) and sma_tr_20 > 0:
-                if tr <= 1.1 * sma_tr_20:
+                if tr <= quality_filter_tr_mult * sma_tr_20:
                     continue
 
             pos = broker.open_position_any(

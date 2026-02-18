@@ -16,10 +16,10 @@ strategy:
   entry_require_close_above: true   # filtrar breakouts solo de mecha
   stop_range_atr_mult: 0.10
   stop_entry_atr_mult: 1.8      # stop razonable (limita pérdida por operación)
-  tp1_r: 1.5                     # primer objetivo +1.5R
+  tp1_r: 2.0                     # optimizado: +retorno sin subir DD (31.97% ann, DD 2.79%)
   tp1_close_pct: 0.4            # cierra 40% en TP1, deja 60% al trail
   chandelier_lookback: 30
-  chandelier_atr_mult: 2.0      # trail amplio para no cortar ganadores pronto
+  chandelier_atr_mult: 2.5      # trail más amplio: deja correr ganancias
   trail_activation_r: 0.5       # aplicar trail solo tras +0.5R (evita salir por ruido)
   time_stop_bars: 15            # más tiempo para dejar correr ganadores
   time_stop_min_r: 0.5

@@ -68,12 +68,87 @@ python cli.py weekly-report --config configs/live.yaml
 
 Opciones comunes: `--config`, `--cache-dir`, `--db`, `--log-level`, `--log-dir`.
 
+## Migrar a VPS (primera vez)
+
+### 1. Requisitos del VPS
+
+- **SO**: Ubuntu/Debian recomendado
+- **Python 3.10+**: `python3 --version`
+- **screen**: `sudo apt install -y screen`
+- **Git**: `sudo apt install -y git` (si vas a clonar)
+
+### 2. Subir el código
+
+**Opción A – Clonar desde Git (recomendado):**
+
+```bash
+cd /home/tu_usuario   # o /root
+git clone https://github.com/TU_USUARIO/last_one.git
+cd last_one
+```
+
+**Opción B – Copiar desde tu PC (rsync o SCP):**
+
+```bash
+# Desde tu PC (Windows PowerShell o WSL):
+scp -r C:\proyectos\last_last_one usuario@TU_VPS_IP:/home/usuario/last_one
+```
+
+### 3. Configurar entorno en el VPS
+
+```bash
+cd /home/usuario/last_one   # o la ruta donde esté el proyecto
+
+# Entorno virtual
+python3 -m venv venv
+source venv/bin/activate
+
+# Dependencias
+pip install -r requirements.txt
+
+# Crear .env desde ejemplo
+cp .env.example .env
+nano .env   # o vi
+```
+
+**Rellenar .env con:**
+
+```
+TELEGRAM_BOT_TOKEN=tu_token_de_BotFather
+TELEGRAM_CHAT_ID=tu_chat_id
+BYBIT_TESTNET_API_KEY=tu_api_key
+BYBIT_TESTNET_SECRET=tu_secret
+```
+
+Las API keys se crean en [Bybit Testnet → API Management](https://testnet.bybit.com/).
+
+### 4. Descargar datos OHLCV
+
+```bash
+source venv/bin/activate
+python cli.py fetch-data --end-date today
+```
+
+Esto crea `data/cache/` y descarga velas 4H de BTCUSDT. Sin esto, el paper-live no tendrá datos.
+
+### 5. Crear directorios (si no existen)
+
+```bash
+mkdir -p data/cache data/logs
+```
+
+### 6. Arrancar procesos (ver sección siguiente)
+
+Seguir los pasos de **Despliegue en VPS** para poner en marcha LONG, SHORT, bot Telegram y dashboard.
+
+---
+
 ## Despliegue en VPS (LONG + SHORT + Bot Telegram)
 
 Para ejecutar ambas estrategias en un VPS con monitoreo remoto:
 
 ```bash
-# 1. Actualizar datos
+# 1. Actualizar datos (antes de cada arranque recomendado)
 source venv/bin/activate
 python cli.py fetch-data --end-date today
 
@@ -95,12 +170,27 @@ source venv/bin/activate
 python cli.py telegram-bot
 # Ctrl+A, luego D para salir sin matar
 
+# 5. Dashboard (monitoreo web: estado, métricas, posiciones)
+screen -S dashboard
+source venv/bin/activate
+pip install streamlit-autorefresh   # opcional, para auto-refresh cada 60s
+streamlit run src/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+# Ctrl+A, luego D para salir sin matar
+# Acceder desde navegador: http://TU_VPS_IP:8501
+
 # Ver sesiones activas
 screen -ls
 
 # Volver a una sesión
-screen -r long    # o short, tgbot
+screen -r long    # o short, tgbot, dashboard
 ```
+
+**Firewall** (si quieres ver el dashboard desde fuera):
+```bash
+sudo ufw allow 8501/tcp
+sudo ufw reload
+```
+Luego accede desde el navegador a `http://TU_VPS_IP:8501`.
 
 **Importante**: El bot de Telegram debe ejecutarse en una **única instancia**. Si hay otro proceso usando `getUpdates` con el mismo token, se produce un error 409 Conflict.
 
@@ -141,6 +231,7 @@ Además de los comandos, el runner envía automáticamente:
 streamlit run src/dashboard/app.py
 ```
 
+- **Live Monitor**: estado de runners LONG/SHORT (activo/stale), posiciones, balance, últimos trades, PnL. Auto-refresh cada 60s.
 - **Runs**: lista de runs (backtest y walk-forward) con parámetros y métricas; comparación de 2 runs.
 - **Run detail**: equity curve + drawdown, tabla de trades, gráfico de precio con marcadores.
 - **Walk-Forward**: tabla por ventana + gráfico de métricas.
@@ -163,14 +254,26 @@ streamlit run src/dashboard/app.py
 - **Time stop**: si tras N velas no alcanza `time_stop_min_r`, cierra.
 - **Fees/slippage**: taker 0.06%, slippage 0.02%; modo stress duplica.
 
-## Rendimiento (backtest 2019-2025)
+## Rendimiento (backtest 2020-01-01 a 2025-12-31, 10k USD)
 
 | Métrica | LONG | SHORT |
 |---------|------|-------|
-| Retorno anual | ~25% | ~21% |
-| Max Drawdown | ~2.8% | ~6.9% |
-| Profit Factor | 7.23 | 3.58 |
-| Trades | 355 | 308 |
+| Retorno total | 428.58% | 198.30% |
+| Retorno anualizado | ~32% | ~20% |
+| Max Drawdown | 2.79% | 6.91% |
+| Profit Factor | 8.41 | 3.49 |
+| Trades | 327 | 287 |
+
+**Combinado (5k LONG + 5k SHORT)**: retorno total ~250%, anualizado ~23%, DD contenido por diversificación.
+
+### Optimización (retorno sin subir DD)
+
+```bash
+python scripts/dev/optimize_return_dd_constraint.py           # grid completo
+python scripts/dev/optimize_return_dd_constraint.py --quick   # 2 combos/estrategia
+```
+
+Parámetros evaluados: `tp1_r`, `chandelier_atr_mult`, `quality_filter_tr_mult`. Resultados en `data/optimize_results.txt`.
 
 ## Estructura del proyecto
 

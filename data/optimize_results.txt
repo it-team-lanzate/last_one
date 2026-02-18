@@ -1,0 +1,17 @@
+
+=== LONG | baseline ===
+
+--- Top 10 (DD <= 2.91%) ---
+  #1 ann=31.97% (+5.97) | return=428.58% | DD=2.79% | trades=327 | {'tp1_r': 2.0, 'chandelier_atr_mult': 2.5, 'quality_filter_tr_mult': 1.1}
+
+*** Mejor: ann=31.97% (+5.97 vs baseline) | DD=2.79% ***
+    Overrides: {'tp1_r': 2.0, 'chandelier_atr_mult': 2.5, 'quality_filter_tr_mult': 1.1}
+
+=== SHORT | baseline ===
+
+--- Top 10 (DD <= 7.26%) ---
+  #1 ann=18.63% (-1.34) | return=178.91% | DD=6.81% | trades=275 | {'tp1_r': 2.25, 'chandelier_atr_mult': 2.2, 'quality_filter_tr_mult': 1.1}
+
+============================================================
+RESUMEN OPTIMIZACIÓN
+LONG mejor:  ann=31.97% | DD=2.79% | {'tp1_r': 2.0, 'chandelier_atr_mult': 2.5, 'quality_filter_tr_mult': 1.1}
