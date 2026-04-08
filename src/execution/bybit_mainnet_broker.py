@@ -1,7 +1,9 @@
 """
-Broker para Bybit Futures Testnet: órdenes reales en sandbox.
-Las posiciones se ven en https://testnet.bybit.com/
-API keys: https://testnet.bybit.com/ → API Management
+Broker para Bybit Futures Mainnet: órdenes reales con dinero real.
+API keys: https://www.bybit.com/ → API Management
+
+IMPORTANTE: Este broker opera en producción real. Verificar claves y configuración
+antes de usar. Las keys de testnet NO funcionan aquí.
 """
 import logging
 import os
@@ -17,31 +19,88 @@ log = logging.getLogger(__name__)
 
 SYMBOL_CCXT = "BTC/USDT:USDT"
 
-# Reintentos para llamadas de lectura (balance, posición, precio)
 MAX_RETRIES = 3
 RETRY_DELAY = 5  # segundos entre reintentos
 
 
 def get_exchange() -> ccxt.Exchange:
-    """Devuelve instancia de Bybit Futures Testnet (sandbox)."""
-    api_key = os.getenv("BYBIT_TESTNET_API_KEY", "")
-    secret = os.getenv("BYBIT_TESTNET_SECRET", "")
+    """Devuelve instancia de Bybit Futures Mainnet."""
+    api_key = os.getenv("BYBIT_API_KEY", "")
+    secret = os.getenv("BYBIT_SECRET", "")
     if not api_key or not secret:
         raise ValueError(
-            "Faltan BYBIT_TESTNET_API_KEY y BYBIT_TESTNET_SECRET en .env. "
-            "Créalas en https://testnet.bybit.com/ → API Management"
+            "Faltan BYBIT_API_KEY y BYBIT_SECRET en .env. "
+            "Créalas en https://www.bybit.com/ → API Management"
+        )
+    if len(api_key) < 10 or len(secret) < 10:
+        raise ValueError(
+            "BYBIT_API_KEY o BYBIT_SECRET parecen inválidas (demasiado cortas). "
+            "Verificar que se copiaron correctamente."
         )
     exchange = ccxt.bybit(
         {
             "apiKey": api_key,
             "secret": secret,
             "enableRateLimit": True,
-            "timeout": 30000,  # 30s timeout (default era 10s)
-            "options": {"defaultType": "swap"},  # futuros perpetuos (derivados)
+            "timeout": 30000,
+            "options": {"defaultType": "swap"},  # futuros perpetuos
         }
     )
-    exchange.set_sandbox_mode(True)
+    # NO llamar set_sandbox_mode: por defecto opera en mainnet
     return exchange
+
+
+_CB_FAILURE_THRESHOLD = 5      # fallos consecutivos para abrir el circuit
+_CB_RECOVERY_SECONDS = 600    # 10 min antes de intentar HALF-OPEN
+
+
+class _CircuitBreaker:
+    """
+    Circuit breaker simple para llamadas de lectura a la API de Bybit.
+    Estados: CLOSED (normal) → OPEN (fallos acumulados) → HALF_OPEN (prueba) → CLOSED.
+    Las operaciones de escritura (órdenes) siempre pasan: nunca cachear.
+    """
+
+    CLOSED = "CLOSED"
+    OPEN = "OPEN"
+    HALF_OPEN = "HALF_OPEN"
+
+    def __init__(self) -> None:
+        self.state = self.CLOSED
+        self._failure_count = 0
+        self._opened_at: float = 0.0
+        self._cache: dict = {}
+
+    def call(self, fn, description: str, cache_key: str | None = None):
+        """Ejecuta fn() respetando el estado del circuit breaker."""
+        if self.state == self.OPEN:
+            if time.time() - self._opened_at >= _CB_RECOVERY_SECONDS:
+                log.info("CircuitBreaker: intentando HALF_OPEN para %s", description)
+                self.state = self.HALF_OPEN
+            else:
+                if cache_key and cache_key in self._cache:
+                    log.warning("CircuitBreaker OPEN: devolviendo caché para %s", description)
+                    return self._cache[cache_key]
+                raise ccxt.NetworkError(f"CircuitBreaker OPEN: {description} bloqueado")
+
+        try:
+            result = fn()
+            # Éxito: resetear
+            self._failure_count = 0
+            self.state = self.CLOSED
+            if cache_key is not None:
+                self._cache[cache_key] = result
+            return result
+        except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
+            self._failure_count += 1
+            if self._failure_count >= _CB_FAILURE_THRESHOLD:
+                log.error(
+                    "CircuitBreaker: %d fallos consecutivos en %s. Abriendo circuito por %ds.",
+                    self._failure_count, description, _CB_RECOVERY_SECONDS,
+                )
+                self.state = self.OPEN
+                self._opened_at = time.time()
+            raise
 
 
 def _retry(fn, description: str = "API call"):
@@ -52,22 +111,23 @@ def _retry(fn, description: str = "API call"):
         except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
             if attempt < MAX_RETRIES:
                 log.warning(
-                    "Bybit %s: intento %d/%d falló (%s). Reintentando en %ds...",
+                    "Bybit mainnet %s: intento %d/%d falló (%s). Reintentando en %ds...",
                     description, attempt, MAX_RETRIES, type(e).__name__, RETRY_DELAY,
                 )
                 time.sleep(RETRY_DELAY)
             else:
-                log.error("Bybit %s: %d intentos agotados. Propagando error.", description, MAX_RETRIES)
+                log.error("Bybit mainnet %s: %d intentos agotados. Propagando error.", description, MAX_RETRIES)
                 raise
 
 
-class BybitTestnetBroker:
-    """Coloca órdenes market en Bybit Futures Testnet. Solo LONG."""
+class BybitMainnetBroker:
+    """Coloca órdenes market en Bybit Futures Mainnet. Dinero real."""
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = config or {}
         self._exchange: ccxt.Exchange | None = None
         self.symbol = self._resolve_symbol()
+        self._cb = _CircuitBreaker()
 
     def _resolve_symbol(self) -> str:
         """Convierte el símbolo del config (ej. ETHUSDT) al formato CCXT (ej. ETH/USDT:USDT)."""
@@ -86,13 +146,15 @@ class BybitTestnetBroker:
         return self._exchange
 
     def get_balance_usdt(self) -> float:
-        """Saldo disponible en USDT (con reintentos)."""
-        balance = _retry(lambda: self.exchange.fetch_balance(), "fetch_balance")
-        # Bybit unified account: balance["USDT"]["free"]
+        """Saldo disponible en USDT. Usa circuit breaker: devuelve caché si API está caída."""
+        balance = self._cb.call(
+            lambda: _retry(lambda: self.exchange.fetch_balance(), "fetch_balance"),
+            description="fetch_balance",
+            cache_key="balance",
+        )
         usdt = balance.get("USDT", {})
         if isinstance(usdt, dict):
             return float(usdt.get("free", 0) or 0)
-        # Fallback
         free = balance.get("free", {})
         if isinstance(free, dict):
             return float(free.get("USDT", 0) or 0)
@@ -100,12 +162,14 @@ class BybitTestnetBroker:
 
     def get_position(self, side_filter: str = "long") -> dict[str, Any] | None:
         """
-        Posición abierta en BTC/USDT:USDT (con reintentos).
+        Posición abierta en BTC/USDT:USDT. Usa circuit breaker: devuelve caché si API está caída.
         side_filter: "long" o "short".
         Returns: {"side": str, "qty": float, "entry_price": float} o None.
         """
-        positions = _retry(
-            lambda: self.exchange.fetch_positions([self.symbol]), "fetch_positions"
+        positions = self._cb.call(
+            lambda: _retry(lambda: self.exchange.fetch_positions([self.symbol]), "fetch_positions"),
+            description="fetch_positions",
+            cache_key=f"positions_{side_filter}",
         )
         for p in positions:
             contracts = float(p.get("contracts", 0) or 0)
@@ -122,8 +186,12 @@ class BybitTestnetBroker:
         return None
 
     def get_last_price(self) -> float:
-        """Precio actual (último trade, con reintentos)."""
-        ticker = _retry(lambda: self.exchange.fetch_ticker(self.symbol), "fetch_ticker")
+        """Precio actual. Usa circuit breaker: devuelve caché si API está caída."""
+        ticker = self._cb.call(
+            lambda: _retry(lambda: self.exchange.fetch_ticker(self.symbol), "fetch_ticker"),
+            description="fetch_ticker",
+            cache_key="ticker",
+        )
         return float(ticker.get("last") or ticker.get("close") or 0)
 
     def _execute_order(self, side: str, qty_btc: float) -> dict[str, Any]:
@@ -133,7 +201,6 @@ class BybitTestnetBroker:
         ya se ejecutó antes de reintentar, evitando posiciones duplicadas.
         """
         qty_str = self.exchange.amount_to_precision(self.symbol, qty_btc)
-        # side "buy" abre LONG; side "sell" cierra LONG (o abre SHORT)
         expected_position_side = "long" if side == "buy" else "short"
 
         for attempt in range(1, 3):  # máximo 2 intentos
@@ -146,7 +213,6 @@ class BybitTestnetBroker:
             except (ccxt.RequestTimeout, ccxt.NetworkError) as e:
                 log.warning("Order %s: intento %d/2 falló (%s).", side, attempt, type(e).__name__)
                 if attempt == 1:
-                    # Antes de reintentar: verificar si la orden ya se ejecutó en Bybit
                     time.sleep(RETRY_DELAY)
                     try:
                         existing = self.get_position(side_filter=expected_position_side)
@@ -159,7 +225,6 @@ class BybitTestnetBroker:
                             return {"id": "recovered", "status": "closed", "info": existing}
                     except Exception as check_err:
                         log.warning("No se pudo verificar posición post-timeout: %s", check_err)
-                    # No hay posición confirmada → reintentar
                 else:
                     raise
 
@@ -168,7 +233,7 @@ class BybitTestnetBroker:
         if qty_btc <= 0:
             raise ValueError("qty_btc debe ser > 0")
         order = self._execute_order("buy", qty_btc)
-        log.info("Bybit Testnet BUY %s BTC @ market -> order %s", self.exchange.amount_to_precision(self.symbol, qty_btc), order.get("id"))
+        log.info("Bybit Mainnet BUY %s BTC @ market -> order %s", self.exchange.amount_to_precision(self.symbol, qty_btc), order.get("id"))
         return order
 
     def market_sell(self, qty_btc: float) -> dict[str, Any]:
@@ -176,7 +241,7 @@ class BybitTestnetBroker:
         if qty_btc <= 0:
             raise ValueError("qty_btc debe ser > 0")
         order = self._execute_order("sell", qty_btc)
-        log.info("Bybit Testnet SELL %s BTC @ market -> order %s", self.exchange.amount_to_precision(self.symbol, qty_btc), order.get("id"))
+        log.info("Bybit Mainnet SELL %s BTC @ market -> order %s", self.exchange.amount_to_precision(self.symbol, qty_btc), order.get("id"))
         return order
 
     def limit_buy(self, qty_btc: float, price: float) -> dict[str, Any]:
@@ -189,7 +254,7 @@ class BybitTestnetBroker:
             lambda: self.exchange.create_limit_buy_order(self.symbol, qty_str, price_str),
             "limit_buy",
         )
-        log.info("Bybit Testnet LIMIT BUY %.5f BTC @ %.2f -> order %s", qty_btc, price, order.get("id"))
+        log.info("Bybit Mainnet LIMIT BUY %.5f BTC @ %.2f -> order %s", qty_btc, price, order.get("id"))
         return order
 
     def limit_sell(self, qty_btc: float, price: float) -> dict[str, Any]:
@@ -202,7 +267,7 @@ class BybitTestnetBroker:
             lambda: self.exchange.create_limit_sell_order(self.symbol, qty_str, price_str),
             "limit_sell",
         )
-        log.info("Bybit Testnet LIMIT SELL %.5f BTC @ %.2f -> order %s", qty_btc, price, order.get("id"))
+        log.info("Bybit Mainnet LIMIT SELL %.5f BTC @ %.2f -> order %s", qty_btc, price, order.get("id"))
         return order
 
     def get_order(self, order_id: str) -> dict[str, Any] | None:

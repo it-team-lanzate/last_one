@@ -1,0 +1,23 @@
+# MAINNET SHORT: órdenes reales en Bybit Futures con dinero real.
+# Requiere BYBIT_API_KEY y BYBIT_SECRET en .env (NOT las de testnet).
+# Comando: python cli.py paper-live --config configs/mainnet_short.yaml --execute
+# ADVERTENCIA: Este config opera con dinero real. Verificar parámetros antes de usar.
+
+extends: live_short.yaml
+
+execution:
+  broker: mainnet   # "testnet" | "mainnet"
+
+# Riesgo conservador para primeras semanas en producción
+risk:
+  risk_pct: 0.005
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.10
+  max_consecutive_losses: 5
+  # Allocation dinámica: el SHORT opera con risk_pct normal en bear, mitad en bull
+  dynamic_allocation: true
+  alloc_favor_mult: 1.0
+  alloc_against_mult: 0.5
+  alloc_sma_period: 200
+  use_limit_entry: true
+  limit_entry_expiry_bars: 1

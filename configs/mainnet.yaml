@@ -1,0 +1,25 @@
+# MAINNET LONG: órdenes reales en Bybit Futures con dinero real.
+# Requiere BYBIT_API_KEY y BYBIT_SECRET en .env (NOT las de testnet).
+# Comando: python cli.py paper-live --config configs/mainnet.yaml --execute
+# ADVERTENCIA: Este config opera con dinero real. Verificar parámetros antes de usar.
+
+extends: live.yaml
+
+execution:
+  broker: mainnet   # "testnet" | "mainnet"
+
+# Riesgo conservador para primeras semanas en producción
+risk:
+  risk_pct: 0.005           # 0.5% por trade base
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.10
+  max_consecutive_losses: 5
+  # Allocation dinámica: en bull market el LONG opera con risk_pct normal,
+  # en bear market opera con la mitad (ahorra capital en tendencia en contra)
+  dynamic_allocation: true
+  alloc_favor_mult: 1.0
+  alloc_against_mult: 0.5
+  alloc_sma_period: 200
+  # Limit orders en entradas: maker fee 0.02% vs taker 0.06% → +0.04% por entrada
+  use_limit_entry: true
+  limit_entry_expiry_bars: 1  # cancelar si no se llena en 1 vela 4H

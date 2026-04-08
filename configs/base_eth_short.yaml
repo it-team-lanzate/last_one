@@ -1,0 +1,54 @@
+# ETH/USDT SHORT — Squeeze Breakdown
+# Parámetros idénticos a BTC SHORT como punto de partida.
+
+symbol: ETHUSDT
+timeframe: 4h
+
+strategy:
+  name: squeeze_breakdown_short
+  direction: short
+  squeeze_mode: relative
+  squeeze_percentile_max: null
+  squeeze_percentile_lookback: 100
+  squeeze_min_bars: 1
+  squeeze_width_ratio: 2.0
+  entry_atr_mult: 0.05
+  entry_require_close_above: true
+  stop_range_atr_mult: 0.05
+  stop_entry_atr_mult: 1.8
+  tp1_r: 2.0
+  tp1_close_pct: 0.4
+  chandelier_lookback: 30
+  chandelier_atr_mult: 2.0
+  trail_activation_r: 0.5
+  time_stop_bars: 15
+  time_stop_min_r: 0.5
+  quality_filter: true
+  trend_filter: true
+  trend_period: 150
+  min_r_atr_mult: 0.4
+
+indicators:
+  bb_period: 20
+  bb_std: 2.0
+  kc_period: 20
+  kc_atr_mult: 1.5
+  atr_period: 14
+  atr_period_stops: 14
+
+fees:
+  fee_rate_side: 0.0006
+  slippage_side: 0.0002
+  stress_mode: false
+
+risk:
+  risk_pct: 0.011
+  risk_use_initial_capital: false
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.15
+  max_consecutive_losses: 10
+
+backtest:
+  start_date: "2020-01-01"
+  end_date: "2025-12-31"
+  initial_capital: 10000.0

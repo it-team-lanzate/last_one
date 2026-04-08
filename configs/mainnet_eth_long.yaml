@@ -1,0 +1,21 @@
+# ETH/USDT LONG — Mainnet (dinero real)
+# Requiere BYBIT_API_KEY y BYBIT_SECRET en .env
+# Comando: python cli.py paper-live --config configs/mainnet_eth_long.yaml --execute
+# ADVERTENCIA: Órdenes reales. Verificar parámetros antes de usar.
+
+extends: live_eth_long.yaml
+
+execution:
+  broker: mainnet
+
+risk:
+  risk_pct: 0.005
+  max_open_positions: 1
+  max_drawdown_stop_pct: 0.10
+  max_consecutive_losses: 5
+  dynamic_allocation: true
+  alloc_favor_mult: 1.0
+  alloc_against_mult: 0.5
+  alloc_sma_period: 200
+  use_limit_entry: true
+  limit_entry_expiry_bars: 1

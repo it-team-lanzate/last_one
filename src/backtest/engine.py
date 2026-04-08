@@ -117,6 +117,15 @@ def run_backtest(
     if trend_filter and "trend_sma" not in df.columns:
         df["trend_sma"] = df["close"].rolling(trend_period).mean()
 
+    # Allocation dinámica (opcional)
+    dynamic_allocation = risk.get("dynamic_allocation", False)
+    alloc_favor_mult = float(risk.get("alloc_favor_mult", 1.0))
+    alloc_against_mult = float(risk.get("alloc_against_mult", 0.5))
+    alloc_sma_period = int(risk.get("alloc_sma_period", 200))
+    base_risk_pct = float(risk.get("risk_pct", 0.01))
+    if dynamic_allocation:
+        df["alloc_sma"] = df["close"].rolling(alloc_sma_period).mean()
+
     broker = PaperBroker(config, initial_capital)
     trades: list[Trade] = []
     entered_ranges: set[int] = set()
@@ -287,6 +296,18 @@ def run_backtest(
             if quality_filter and tr is not None and sma_tr_20 is not None and pd.notna(sma_tr_20) and sma_tr_20 > 0:
                 if tr <= quality_filter_tr_mult * sma_tr_20:
                     continue
+
+            # Allocation dinámica: ajustar risk_pct según régimen antes de abrir
+            if dynamic_allocation and "alloc_sma" in df.columns:
+                alloc_sma_val = bar.get("alloc_sma")
+                if not pd.isna(alloc_sma_val) and alloc_sma_val > 0:
+                    market_is_bull = close > alloc_sma_val
+                    strategy_favored = (not is_short and market_is_bull) or (is_short and not market_is_bull)
+                    broker.risk_pct = base_risk_pct * (alloc_favor_mult if strategy_favored else alloc_against_mult)
+                else:
+                    broker.risk_pct = base_risk_pct
+            else:
+                broker.risk_pct = base_risk_pct
 
             pos = broker.open_position_any(
                 bar=bar,

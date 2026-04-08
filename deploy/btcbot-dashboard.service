@@ -1,0 +1,20 @@
+[Unit]
+Description=BTC Bot Streamlit Dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/last_last_one
+EnvironmentFile=/home/ubuntu/last_last_one/.env
+ExecStart=/home/ubuntu/last_last_one/venv/bin/streamlit run src/dashboard/app.py \
+    --server.port 8501 --server.address 0.0.0.0 --server.headless true
+Restart=on-failure
+RestartSec=15s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-dashboard
+
+[Install]
+WantedBy=multi-user.target

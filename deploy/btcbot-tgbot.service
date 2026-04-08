@@ -1,0 +1,20 @@
+[Unit]
+Description=BTC Bot Telegram bot
+After=network-online.target btcbot-long.service btcbot-short.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/last_last_one
+EnvironmentFile=/home/ubuntu/last_last_one/.env
+ExecStart=/home/ubuntu/last_last_one/venv/bin/python cli.py telegram-bot \
+    --log-dir data/logs
+Restart=on-failure
+RestartSec=30s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-tgbot
+
+[Install]
+WantedBy=multi-user.target

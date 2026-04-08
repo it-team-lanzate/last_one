@@ -1,0 +1,20 @@
+[Unit]
+Description=BTC Bot LONG strategy (Bybit)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/last_last_one
+EnvironmentFile=/home/ubuntu/last_last_one/.env
+ExecStart=/home/ubuntu/last_last_one/venv/bin/python cli.py paper-live \
+    --config configs/mainnet.yaml --execute --log-dir data/logs
+Restart=on-failure
+RestartSec=30s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=btcbot-long
+
+[Install]
+WantedBy=multi-user.target

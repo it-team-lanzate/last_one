@@ -30,10 +30,36 @@ log = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-STATE_LONG = Path("data/paper_live_state.json")
-STATE_SHORT = Path("data/paper_live_state_short.json")
-
+DATA_DIR = Path("data")
 POLL_TIMEOUT = 30  # segundos de long-polling
+
+
+def _discover_state_files() -> list[tuple[str, Path]]:
+    """
+    Descubre dinámicamente todos los state files activos en data/.
+    Formato: paper_live_state_{symbol}_{direction}.json
+    Retorna lista de (label, path) ej: [("BTCUSDT LONG", Path(...)), ...]
+    """
+    states = []
+    for p in sorted(DATA_DIR.glob("paper_live_state_*.json")):
+        # Excluir backups y .tmp
+        if ".tmp" in p.name or "backup" in p.name.lower():
+            continue
+        # Extraer label del nombre: paper_live_state_btcusdt_long.json → BTCUSDT LONG
+        stem = p.stem.replace("paper_live_state_", "")
+        parts = stem.rsplit("_", 1)
+        if len(parts) == 2:
+            symbol, direction = parts[0].upper(), parts[1].upper()
+            label = f"{symbol} {direction}"
+        else:
+            label = stem.upper()
+        states.append((label, p))
+    return states
+
+
+# Compat: mantener referencias directas para backward compat con código existente
+STATE_LONG = DATA_DIR / "paper_live_state_btcusdt_long.json"
+STATE_SHORT = DATA_DIR / "paper_live_state_btcusdt_short.json"
 
 
 def _escape(s: str) -> str:
@@ -142,46 +168,45 @@ def _format_position(state: dict, label: str, price: float | None) -> str:
 
 
 def _handle_status(chat_id: str) -> None:
-    """Comando /status: estado de ambas estrategias."""
-    state_long = _load_state(STATE_LONG)
-    state_short = _load_state(STATE_SHORT)
+    """Comando /status: estado de todas las estrategias activas."""
+    active = _discover_state_files()
     price = _get_bybit_price()
     balance = _get_bybit_balance()
 
     lines = ["📊 <b>Estado actual</b>\n"]
+
+    if not active:
+        lines.append("⚠️ No se encontraron runners activos en data/")
+        _send(chat_id, "\n".join(lines))
+        return
+
+    paused_labels = [label for label, path in active if _load_state(path).get("paused", False)]
+    if paused_labels:
+        lines.append(f"⏸ <b>PAUSADO</b>: {', '.join(paused_labels)} (usa /resume para reanudar)\n")
 
     if price:
         lines.append(f"💰 BTC/USDT: <b>{price:,.2f}</b>")
     if balance is not None:
         lines.append(f"🏦 Balance Bybit: <b>{balance:,.2f} USDT</b>")
 
-    lines.append("")
-    lines.append(_format_position(state_long, "LONG", price))
-    lines.append("")
-    lines.append(_format_position(state_short, "SHORT", price))
-
-    # Última vela procesada
-    last_long = state_long.get("last_candle_time", "—")
-    last_short = state_short.get("last_candle_time", "—")
-    lines.append("")
-    lines.append(f"🕐 Última vela LONG: {_escape(last_long)}")
-    lines.append(f"🕐 Última vela SHORT: {_escape(last_short)}")
+    for label, path in active:
+        state = _load_state(path)
+        lines.append("")
+        lines.append(_format_position(state, label, price))
+        last_candle = state.get("last_candle_time", "—")
+        lines.append(f"  🕐 Última vela: {_escape(last_candle)}")
 
     _send(chat_id, "\n".join(lines))
 
 
 def _handle_trades(chat_id: str) -> None:
-    """Comando /trades: últimos trades cerrados de ambas estrategias."""
-    state_long = _load_state(STATE_LONG)
-    state_short = _load_state(STATE_SHORT)
-
-    trades_long = state_long.get("closed_trades", [])
-    trades_short = state_short.get("closed_trades", [])
+    """Comando /trades: últimos trades cerrados de todas las estrategias activas."""
+    active = _discover_state_files()
 
     def _fmt_trades(trades: list, label: str) -> str:
         if not trades:
             return f"  <b>{label}</b>: Sin trades registrados"
-        recent = trades[-5:]  # últimos 5
+        recent = trades[-5:]
         lines = [f"  <b>{label}</b> (últimos {len(recent)}):"]
         for t in reversed(recent):
             pnl = t.get("pnl_net", 0)
@@ -198,26 +223,26 @@ def _handle_trades(chat_id: str) -> None:
         return "\n".join(lines)
 
     lines = ["📋 <b>Últimos trades</b>\n"]
-    lines.append(_fmt_trades(trades_long, "LONG"))
-    lines.append("")
-    lines.append(_fmt_trades(trades_short, "SHORT"))
-
-    # Estadísticas 7 días
     cutoff = (datetime.utcnow() - timedelta(days=7)).strftime("%Y-%m-%d")
-    week_long = [t for t in trades_long if (t.get("exit_time") or "")[:10] >= cutoff]
-    week_short = [t for t in trades_short if (t.get("exit_time") or "")[:10] >= cutoff]
-    pnl_week = sum(t.get("pnl_net", 0) for t in week_long + week_short)
-    n_week = len(week_long) + len(week_short)
+    all_week_trades = []
+
+    for label, path in active:
+        state = _load_state(path)
+        trades = state.get("closed_trades", [])
+        lines.append(_fmt_trades(trades, label))
+        lines.append("")
+        all_week_trades += [t for t in trades if (t.get("exit_time") or "")[:10] >= cutoff]
+
+    pnl_week = sum(t.get("pnl_net", 0) for t in all_week_trades)
     pnl_str = f"+{pnl_week:.2f}" if pnl_week >= 0 else f"{pnl_week:.2f}"
-    lines.append(f"\n📅 <b>Últimos 7 días</b>: {n_week} trades, PnL: {pnl_str} USDT")
+    lines.append(f"📅 <b>Últimos 7 días</b>: {len(all_week_trades)} trades, PnL: {pnl_str} USDT")
 
     _send(chat_id, "\n".join(lines))
 
 
 def _handle_equity(chat_id: str) -> None:
-    """Comando /equity: resumen de rendimiento."""
-    state_long = _load_state(STATE_LONG)
-    state_short = _load_state(STATE_SHORT)
+    """Comando /equity: resumen de rendimiento de todas las estrategias activas."""
+    active = _discover_state_files()
     balance = _get_bybit_balance()
 
     def _stats(trades: list) -> dict:
@@ -230,18 +255,6 @@ def _handle_equity(chat_id: str) -> None:
         worst = min(t.get("pnl_net", 0) for t in trades)
         return {"n": n, "pnl": pnl, "wins": wins, "wr": wins / n * 100, "best": best, "worst": worst}
 
-    trades_long = state_long.get("closed_trades", [])
-    trades_short = state_short.get("closed_trades", [])
-    sl = _stats(trades_long)
-    ss = _stats(trades_short)
-    combined_pnl = sl["pnl"] + ss["pnl"]
-
-    lines = ["📈 <b>Resumen de rendimiento</b>\n"]
-
-    if balance is not None:
-        lines.append(f"🏦 Balance actual: <b>{balance:,.2f} USDT</b>")
-        lines.append("")
-
     def _fmt_stats(s: dict, label: str) -> str:
         if s["n"] == 0:
             return f"  <b>{label}</b>: Sin trades"
@@ -252,10 +265,19 @@ def _handle_equity(chat_id: str) -> None:
             f"  Mejor: +{s['best']:.2f} | Peor: {s['worst']:.2f}"
         )
 
-    lines.append(_fmt_stats(sl, "LONG"))
-    lines.append("")
-    lines.append(_fmt_stats(ss, "SHORT"))
-    lines.append("")
+    lines = ["📈 <b>Resumen de rendimiento</b>\n"]
+    if balance is not None:
+        lines.append(f"🏦 Balance actual: <b>{balance:,.2f} USDT</b>")
+        lines.append("")
+
+    combined_pnl = 0.0
+    for label, path in active:
+        state = _load_state(path)
+        trades = state.get("closed_trades", [])
+        s = _stats(trades)
+        combined_pnl += s["pnl"]
+        lines.append(_fmt_stats(s, label))
+        lines.append("")
 
     emoji = "🟢" if combined_pnl >= 0 else "🔴"
     cpnl_str = f"+{combined_pnl:.2f}" if combined_pnl >= 0 else f"{combined_pnl:.2f}"
@@ -264,14 +286,55 @@ def _handle_equity(chat_id: str) -> None:
     _send(chat_id, "\n".join(lines))
 
 
+def _set_paused_flag(paused: bool) -> list[str]:
+    """Escribe paused=True/False en todos los state files activos. Devuelve lista de labels modificados."""
+    modified = []
+    for label, path in _discover_state_files():
+        if not path.exists():
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                state = json.load(f)
+            state["paused"] = paused
+            tmp = path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(state, f, indent=2)
+            import os
+            os.replace(tmp, path)
+            modified.append(label)
+        except Exception as e:
+            log.warning("No se pudo actualizar paused en %s: %s", path, e)
+    return modified
+
+
+def _handle_pause(chat_id: str) -> None:
+    """Comando /pause: detiene nuevas entradas en ambas estrategias."""
+    modified = _set_paused_flag(True)
+    if modified:
+        _send(chat_id, f"⏸ <b>Bot pausado</b>\nNo se abrirán nuevas entradas.\nEstrategias afectadas: {', '.join(modified)}\nUsa /resume para reanudar.")
+    else:
+        _send(chat_id, "⚠️ No se encontraron state files activos. ¿Están corriendo los runners?")
+
+
+def _handle_resume(chat_id: str) -> None:
+    """Comando /resume: reanuda las entradas en ambas estrategias."""
+    modified = _set_paused_flag(False)
+    if modified:
+        _send(chat_id, f"▶️ <b>Bot reanudado</b>\nSe evaluarán entradas normalmente.\nEstrategias afectadas: {', '.join(modified)}")
+    else:
+        _send(chat_id, "⚠️ No se encontraron state files activos. ¿Están corriendo los runners?")
+
+
 def _handle_help(chat_id: str) -> None:
     """Comando /help."""
     msg = (
         "🤖 <b>Comandos disponibles</b>\n\n"
-        "/status - Estado actual (posiciones, balance, precio)\n"
-        "/trades - Últimos 5 trades por estrategia\n"
-        "/equity - Resumen de rendimiento total\n"
-        "/help - Este mensaje"
+        "/status  - Estado actual (posiciones, balance, precio)\n"
+        "/trades  - Últimos 5 trades por estrategia\n"
+        "/equity  - Resumen de rendimiento total\n"
+        "/pause   - Pausar nuevas entradas (no cierra posiciones abiertas)\n"
+        "/resume  - Reanudar entradas\n"
+        "/help    - Este mensaje"
     )
     _send(chat_id, msg)
 
@@ -280,6 +343,8 @@ COMMANDS = {
     "/status": _handle_status,
     "/trades": _handle_trades,
     "/equity": _handle_equity,
+    "/pause": _handle_pause,
+    "/resume": _handle_resume,
     "/help": _handle_help,
     "/start": _handle_help,
 }

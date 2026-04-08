@@ -6,7 +6,10 @@ Notificaciones por Telegram al abrir/cerrar y resumen semanal.
 """
 import json
 import logging
+import os
+import shutil
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,6 +21,7 @@ from src.data.downloader import download_ohlcv
 from src.strategy.signals import compute_signals
 from src.strategy.squeeze import SqueezeRange
 from src.execution.bybit_testnet_broker import BybitTestnetBroker
+from src.execution.bybit_mainnet_broker import BybitMainnetBroker
 from src.notifications.telegram import (
     is_configured as telegram_configured,
     notify_position_opened,
@@ -31,6 +35,21 @@ log = logging.getLogger(__name__)
 SYMBOL_CCXT = "BTC/USDT:USDT"
 OHLCV_LIMIT = 350
 STATE_PATH = Path("data/paper_live_state.json")
+STATE_VERSION = 2  # incrementar al agregar campos obligatorios al state
+
+
+def _migrate_state(state: dict[str, Any]) -> dict[str, Any]:
+    """
+    Migra el state a STATE_VERSION actual rellenando campos faltantes con defaults.
+    Permite agregar nuevos campos sin romper bots que venían corriendo.
+    """
+    version = state.get("state_version", 1)
+    if version < 2:
+        # v2: agrega peak_equity y paused
+        state.setdefault("peak_equity", state.get("balance_usdt", 0.0))
+        state.setdefault("paused", False)
+        state["state_version"] = 2
+    return state
 
 
 def _symbol_to_ccxt(symbol: str) -> str:
@@ -43,19 +62,49 @@ def _symbol_to_ccxt(symbol: str) -> str:
 
 def _load_state() -> dict[str, Any]:
     if not STATE_PATH.exists():
-        return {}
+        return _migrate_state({})
     try:
         with open(STATE_PATH, encoding="utf-8") as f:
-            return json.load(f)
+            state = json.load(f)
+        return _migrate_state(state)
     except Exception as e:
         log.warning("No se pudo cargar state: %s", e)
-        return {}
+        return _migrate_state({})
+
+
+def _ping_healthcheck(url: str) -> None:
+    """Envía un ping HTTP GET a healthchecks.io (o similar). Silencioso si falla."""
+    if not url:
+        return
+    try:
+        urllib.request.urlopen(url, timeout=5)
+    except Exception as e:
+        log.debug("Healthcheck ping falló (no crítico): %s", e)
+
+
+def _rotate_state_backup() -> None:
+    """Copia el state actual a data/backups/ con timestamp. Conserva los últimos 7 backups."""
+    if not STATE_PATH.exists():
+        return
+    backup_dir = STATE_PATH.parent / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    dest = backup_dir / f"{STATE_PATH.stem}_{ts}{STATE_PATH.suffix}"
+    shutil.copy2(STATE_PATH, dest)
+    # Mantener solo los últimos 7 backups para este state file
+    existing = sorted(backup_dir.glob(f"{STATE_PATH.stem}_*{STATE_PATH.suffix}"))
+    for old in existing[:-7]:
+        old.unlink()
+    log.info("State backup creado: %s (%d backups retenidos)", dest.name, min(len(existing), 7))
 
 
 def _save_state(state: dict[str, Any]) -> None:
+    state["state_version"] = STATE_VERSION
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+    tmp = STATE_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_PATH)  # atomic en POSIX: nunca deja JSON corrupto
 
 
 def _tp1_level(entry: float, r_val: float, tp1_r: float, direction: str = "long") -> float:
@@ -222,17 +271,62 @@ def run_live_loop(
     time_stop_bars = strat.get("time_stop_bars", 15)
     time_stop_min_r = float(strat.get("time_stop_min_r", 0.5))
     risk_pct = float(risk.get("risk_pct", 0.009))
+    max_drawdown_stop_pct = float(risk.get("max_drawdown_stop_pct", 0.15))
+    max_consecutive_losses = int(risk.get("max_consecutive_losses", 10))
+    # Limit orders en entradas (maker fee = 0.02% vs taker 0.06%)
+    # Si use_limit_entry = true, coloca limit al entry_level en lugar de market al close.
+    # La orden expira si no se llena en limit_entry_expiry_bars velas.
+    use_limit_entry = risk.get("use_limit_entry", False)
+    limit_entry_expiry_bars = int(risk.get("limit_entry_expiry_bars", 1))
 
-    # State file separado por dirección para no interferir con LONG
-    if is_short and STATE_PATH == Path("data/paper_live_state.json"):
-        STATE_PATH = Path("data/paper_live_state_short.json")
+    # Allocation dinámica según régimen de mercado (opcional)
+    # Si dynamic_allocation = true, el risk_pct se multiplica según si el mercado
+    # está a favor (bull para LONG, bear para SHORT) o en contra.
+    dynamic_allocation = risk.get("dynamic_allocation", False)
+    alloc_favor_mult = float(risk.get("alloc_favor_mult", 1.0))    # mult cuando mercado a favor
+    alloc_against_mult = float(risk.get("alloc_against_mult", 0.5)) # mult cuando mercado en contra
+    alloc_sma_period = int(risk.get("alloc_sma_period", 200))       # periodo SMA para clasificar régimen
 
-    broker = BybitTestnetBroker(config)
+    # State file único por símbolo + dirección para no interferir entre pares/estrategias
+    symbol_raw = config.get("symbol", "BTCUSDT").upper()
+    if STATE_PATH == Path("data/paper_live_state.json"):
+        suffix = f"_{symbol_raw.lower()}_{'short' if is_short else 'long'}"
+        STATE_PATH = Path(f"data/paper_live_state{suffix}.json")
+
+    broker_mode = config.get("execution", {}).get("broker", "testnet")
     symbol_label = config.get("symbol", "BTCUSDT")
     dir_label = "SHORT" if is_short else "LONG"
-    log.info("Paper live %s (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", dir_label, symbol_ccxt, poll_interval_seconds)
+
+    try:
+        if broker_mode == "mainnet":
+            broker = BybitMainnetBroker(config)
+            log.warning("⚠️  MAINNET MODE: órdenes reales con dinero real. Símbolo=%s", symbol_ccxt)
+        else:
+            broker = BybitTestnetBroker(config)
+            log.info("Paper live %s (Bybit Testnet) iniciado. Símbolo=%s. Poll=%ss. Ctrl+C para parar.", dir_label, symbol_ccxt, poll_interval_seconds)
+    except ValueError as e:
+        log.critical("Error de configuración del broker: %s", e)
+        if telegram_configured():
+            try:
+                from src.notifications.telegram import send_message
+                send_message(f"🚨 <b>Bot {dir_label} NO ARRANCÓ</b>\nError de broker: {str(e)[:300]}")
+            except Exception:
+                pass
+        raise
 
     _process_started_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S")
+
+    # URL de healthcheck externo (healthchecks.io): HEALTHCHECK_URL_LONG o HEALTHCHECK_URL_SHORT
+    _hc_env_var = "HEALTHCHECK_URL_SHORT" if is_short else "HEALTHCHECK_URL_LONG"
+    _healthcheck_url = os.getenv(_hc_env_var, "")
+    if _healthcheck_url:
+        log.info("Healthcheck externo configurado (%s)", _hc_env_var)
+
+    # Backup del state al arrancar (antes del loop, una sola vez)
+    _rotate_state_backup()
+
+    _consecutive_failures = 0
+    _MAX_CONSECUTIVE_FAILURES = 5
 
     while True:
         try:
@@ -279,6 +373,72 @@ def run_live_loop(
                 position = state["position"]
                 _save_state(state)
 
+            # Verificar orden limit pendiente (si use_limit_entry = true)
+            pending_order = state.get("pending_order")
+            if use_limit_entry and pending_order and position is None:
+                order_id = pending_order.get("order_id")
+                placed_bar = pending_order.get("placed_bar")
+                current_bar = state.get("last_candle_time")
+                bars_elapsed = (
+                    1 if placed_bar and current_bar and placed_bar != current_bar else 0
+                )
+                if bars_elapsed >= limit_entry_expiry_bars:
+                    # Orden expiró: cancelar y limpiar
+                    log.info("%s Orden limit %s expiró (%d velas). Cancelando.", dir_label, order_id, bars_elapsed)
+                    broker.cancel_order(order_id)
+                    state.pop("pending_order", None)
+                    _save_state(state)
+                    pending_order = None
+                else:
+                    # Verificar si ya se llenó
+                    order_info = broker.get_order(order_id) if order_id else None
+                    if order_info and order_info.get("status") in ("closed", "filled"):
+                        fill_price = float(order_info.get("average") or order_info.get("price") or pending_order["price"])
+                        qty_filled = float(order_info.get("filled") or pending_order["qty"])
+                        log.info("%s Limit order %s FILLED @ %.2f qty=%.5f", dir_label, order_id, fill_price, qty_filled)
+                        r_val = pending_order.get("r_value", 0.0)
+                        state["balance_usdt"] = broker.get_balance_usdt()
+                        state["position"] = {
+                            "entry_time": current_bar or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S"),
+                            "entry_price": fill_price,
+                            "stop": pending_order["stop"],
+                            "r_value": r_val,
+                            "qty": qty_filled,
+                            "bars_in_trade": 0,
+                            "tp1_done": False,
+                            "tp1_r": tp1_r,
+                            "tp1_close_pct": tp1_close_pct,
+                            "chandelier_lookback": chandelier_lookback,
+                            "chandelier_atr_mult": chandelier_atr_mult,
+                            "trail_activation_r": trail_activation_r,
+                            "time_stop_bars": time_stop_bars,
+                            "time_stop_min_r": time_stop_min_r,
+                        }
+                        state.pop("pending_order", None)
+                        position = state["position"]
+                        entered_ranges = list(state.get("entered_ranges", [])) + [pending_order.get("range_idx", -1)]
+                        state["entered_ranges"] = entered_ranges
+                        _save_state(state)
+                        notify_position_opened(fill_price, pending_order["stop"], qty_filled, symbol=f"{symbol_label} {dir_label}")
+                        pending_order = None
+
+            # Early-exit si la próxima vela 4H aún no cerró (evita ~97% de downloads innecesarios)
+            if last_candle_time:
+                try:
+                    _last_ts = datetime.strptime(last_candle_time, "%Y-%m-%dT%H:%M:%S")
+                    _period_seconds = 4 * 3600  # 4H en segundos
+                    _next_close = _last_ts + timedelta(seconds=_period_seconds)
+                    _seconds_to_close = (_next_close - datetime.utcnow()).total_seconds()
+                    if _seconds_to_close > 60:
+                        log.debug(
+                            "%s Próxima vela en %.0fm. Saltando download.",
+                            dir_label, _seconds_to_close / 60,
+                        )
+                        time.sleep(poll_interval_seconds)
+                        continue
+                except Exception:
+                    pass  # si falla el parse, continuar con download normal
+
             # Datos OHLCV recientes (Binance producción, datos públicos)
             try:
                 df = download_ohlcv(symbol=symbol_ccxt, timeframe=timeframe, limit=OHLCV_LIMIT)
@@ -292,6 +452,20 @@ def run_live_loop(
                 continue
 
             df = df.sort_values("open_time").reset_index(drop=True)
+
+            # Validar que los datos no sean stale (última vela no más vieja que 2 períodos)
+            _last_open_time = pd.Timestamp(df.iloc[-1]["open_time"])
+            if _last_open_time.tzinfo is not None:
+                _last_open_time = _last_open_time.tz_localize(None)
+            _candle_age_hours = (datetime.utcnow() - _last_open_time).total_seconds() / 3600
+            _max_candle_age_hours = 10  # 2 períodos de 4H + margen
+            if _candle_age_hours > _max_candle_age_hours:
+                log.warning(
+                    "%s Datos OHLCV stale: última vela tiene %.1fh de antigüedad (máx %dh). Reintentando.",
+                    dir_label, _candle_age_hours, _max_candle_age_hours,
+                )
+                time.sleep(poll_interval_seconds)
+                continue
             df = compute_signals(df, config)
             ranges: list[SqueezeRange] = df.attrs.get("squeeze_ranges", [])
             if "atr_14" not in df.columns:
@@ -304,6 +478,8 @@ def run_live_loop(
                 df["high_22"] = df["high"].rolling(chandelier_lookback).max()
             if trend_filter:
                 df["trend_sma"] = df["close"].rolling(trend_period).mean()
+            if dynamic_allocation:
+                df["alloc_sma"] = df["close"].rolling(alloc_sma_period).mean()
 
             last_bar = df.iloc[-1]
             bar_ts = last_bar["open_time"]
@@ -424,6 +600,65 @@ def run_live_loop(
                 log.warning("Error obteniendo balance para entrada: %s. Saltando ciclo.", e)
                 time.sleep(poll_interval_seconds)
                 continue
+
+            # Actualizar equity máximo histórico y verificar drawdown
+            peak_equity = state.get("peak_equity", initial_capital)
+            if equity > peak_equity:
+                state["peak_equity"] = equity
+                peak_equity = equity
+            current_drawdown = (peak_equity - equity) / peak_equity if peak_equity > 0 else 0.0
+
+            # Verificar pérdidas consecutivas
+            recent_trades = state.get("closed_trades", [])
+            consecutive_losses = 0
+            for t in reversed(recent_trades):
+                if (t.get("pnl_net") or 0) < 0:
+                    consecutive_losses += 1
+                else:
+                    break
+
+            _entry_blocked = False
+            if state.get("paused", False):
+                log.info("%s Bot pausado via Telegram (/pause). No se evalúan entradas.", dir_label)
+                _entry_blocked = True
+            elif current_drawdown >= max_drawdown_stop_pct:
+                log.warning(
+                    "%s DRAWDOWN GUARD: DD actual=%.1f%% >= límite=%.1f%%. No se abren nuevas entradas.",
+                    dir_label, current_drawdown * 100, max_drawdown_stop_pct * 100,
+                )
+                if telegram_configured():
+                    try:
+                        from src.notifications.telegram import send_message
+                        send_message(
+                            f"⚠️ <b>Bot {dir_label} — Drawdown Guard activo</b>\n"
+                            f"DD: {current_drawdown*100:.1f}% (límite: {max_drawdown_stop_pct*100:.0f}%)\n"
+                            f"No se abrirán nuevas entradas hasta recuperar equity."
+                        )
+                    except Exception:
+                        pass
+                _entry_blocked = True
+            elif consecutive_losses >= max_consecutive_losses:
+                log.warning(
+                    "%s CONSECUTIVE LOSSES GUARD: %d pérdidas seguidas (límite=%d). No se abren nuevas entradas.",
+                    dir_label, consecutive_losses, max_consecutive_losses,
+                )
+                if telegram_configured():
+                    try:
+                        from src.notifications.telegram import send_message
+                        send_message(
+                            f"⚠️ <b>Bot {dir_label} — Pérdidas consecutivas</b>\n"
+                            f"{consecutive_losses} pérdidas seguidas (límite: {max_consecutive_losses}).\n"
+                            f"No se abrirán nuevas entradas."
+                        )
+                    except Exception:
+                        pass
+                _entry_blocked = True
+
+            if _entry_blocked:
+                _save_state(state)
+                time.sleep(poll_interval_seconds)
+                continue
+
             for ri, sr in enumerate(ranges):
                 if sr.end_idx >= i:
                     break
@@ -459,38 +694,77 @@ def run_live_loop(
                     if tr <= quality_filter_tr_mult * sma_tr_20:
                         continue
 
-                risk_usd = equity * risk_pct
+                # Allocation dinámica: ajusta risk_pct según régimen de mercado
+                effective_risk_pct = risk_pct
+                if dynamic_allocation and "alloc_sma" in df.columns:
+                    alloc_sma = last_bar.get("alloc_sma")
+                    if not pd.isna(alloc_sma) and alloc_sma > 0:
+                        market_is_bull = close > alloc_sma
+                        strategy_favored = (not is_short and market_is_bull) or (is_short and not market_is_bull)
+                        effective_risk_pct = risk_pct * (alloc_favor_mult if strategy_favored else alloc_against_mult)
+                        log.debug(
+                            "%s Allocation dinámica: close=%.0f SMA(%d)=%.0f | %s | risk_pct=%.3f→%.3f",
+                            dir_label, close, alloc_sma_period, alloc_sma,
+                            "FAVOR" if strategy_favored else "CONTRA",
+                            risk_pct, effective_risk_pct,
+                        )
+
+                risk_usd = equity * effective_risk_pct
                 if r_val <= 0:
                     break
                 qty_btc = risk_usd / r_val
                 if qty_btc <= 0:
                     break
                 try:
-                    if is_short:
-                        broker.market_sell(qty_btc)
+                    if use_limit_entry and not state.get("pending_order"):
+                        # Limit order al entry_level exacto (maker fee = 0.02%)
+                        limit_price = sr.entry_level
+                        if is_short:
+                            order = broker.limit_sell(qty_btc, limit_price)
+                        else:
+                            order = broker.limit_buy(qty_btc, limit_price)
+                        state["pending_order"] = {
+                            "order_id": order.get("id"),
+                            "price": limit_price,
+                            "qty": qty_btc,
+                            "stop": sr.stop_level,
+                            "r_value": r_val,
+                            "range_idx": ri,
+                            "placed_bar": bar_ts_str,
+                        }
+                        state["entered_ranges"] = list(entered_ranges) + [ri]
+                        _save_state(state)
+                        log.info(
+                            "LIMIT ORDER %s: qty=%.5f @ %.2f (entry_level), stop=%.2f, order_id=%s",
+                            dir_label, qty_btc, limit_price, sr.stop_level, order.get("id"),
+                        )
                     else:
-                        broker.market_buy(qty_btc)
-                    state["balance_usdt"] = broker.get_balance_usdt()
-                    state["position"] = {
-                        "entry_time": bar_ts_str,
-                        "entry_price": close,
-                        "stop": sr.stop_level,
-                        "r_value": r_val,
-                        "qty": qty_btc,
-                        "bars_in_trade": 0,
-                        "tp1_done": False,
-                        "tp1_r": tp1_r,
-                        "tp1_close_pct": tp1_close_pct,
-                        "chandelier_lookback": chandelier_lookback,
-                        "chandelier_atr_mult": chandelier_atr_mult,
-                        "trail_activation_r": trail_activation_r,
-                        "time_stop_bars": time_stop_bars,
-                        "time_stop_min_r": time_stop_min_r,
-                    }
-                    state["entered_ranges"] = list(entered_ranges) + [ri]
-                    _save_state(state)
-                    notify_position_opened(close, sr.stop_level, qty_btc, symbol=f"{symbol_label} {dir_label}")
-                    log.info("ENTRADA %s: qty=%s @ ~%s, stop=%s, balance=%.2f", dir_label, qty_btc, close, sr.stop_level, state["balance_usdt"])
+                        # Market order (comportamiento original)
+                        if is_short:
+                            broker.market_sell(qty_btc)
+                        else:
+                            broker.market_buy(qty_btc)
+                        state["balance_usdt"] = broker.get_balance_usdt()
+                        state["position"] = {
+                            "entry_time": bar_ts_str,
+                            "entry_price": close,
+                            "stop": sr.stop_level,
+                            "r_value": r_val,
+                            "qty": qty_btc,
+                            "bars_in_trade": 0,
+                            "tp1_done": False,
+                            "tp1_r": tp1_r,
+                            "tp1_close_pct": tp1_close_pct,
+                            "chandelier_lookback": chandelier_lookback,
+                            "chandelier_atr_mult": chandelier_atr_mult,
+                            "trail_activation_r": trail_activation_r,
+                            "time_stop_bars": time_stop_bars,
+                            "time_stop_min_r": time_stop_min_r,
+                        }
+                        state["entered_ranges"] = list(entered_ranges) + [ri]
+                        _save_state(state)
+                        notify_position_opened(close, sr.stop_level, qty_btc, symbol=f"{symbol_label} {dir_label}")
+                        log.info("ENTRADA %s: qty=%.5f @ ~%.2f, stop=%.2f, balance=%.2f", dir_label, qty_btc, close, sr.stop_level, state["balance_usdt"])
                 except Exception as e:
                     log.exception("Error al abrir posición %s: %s", dir_label, e)
                 break
@@ -498,9 +772,25 @@ def run_live_loop(
             if state.get("position") is None and position is None:
                 log.info("%s Sin señal de entrada en esta vela. Balance: %.2f USDT. Esperando próxima vela...", dir_label, equity)
             _save_state(state)
+            _ping_healthcheck(_healthcheck_url)
+            _consecutive_failures = 0  # ciclo exitoso: resetear contador
         except KeyboardInterrupt:
             log.info("Paper live detenido por el usuario")
             break
         except Exception as e:
-            log.exception("Error en bucle paper live: %s", e)
+            _consecutive_failures += 1
+            log.exception(
+                "Error en bucle paper live %s (%d consecutivo): %s",
+                dir_label, _consecutive_failures, e,
+            )
+            if _consecutive_failures >= _MAX_CONSECUTIVE_FAILURES and telegram_configured():
+                try:
+                    from src.notifications.telegram import send_message
+                    send_message(
+                        f"🚨 <b>Bot {dir_label} FAILING</b>\n"
+                        f"{_consecutive_failures} errores consecutivos.\n"
+                        f"Último: {str(e)[:200]}"
+                    )
+                except Exception:
+                    pass
         time.sleep(poll_interval_seconds)
