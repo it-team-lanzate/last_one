@@ -451,7 +451,7 @@ def main() -> None:
     if st.session_state.get("page") == "detail" and st.session_state.get("run_id") is not None:
         page_run_detail(st.session_state["run_id"])
         return
-    page = st.sidebar.radio("Page", ["Live Monitor", "Runs", "Run detail", "Walk-Forward"], index=0)
+    page = st.sidebar.radio("Page", ["Live Monitor", "Logs", "Runs", "Run detail", "Walk-Forward"], index=0)
     if page == "Run detail":
         run_id = st.session_state.get("run_id")
         if run_id is not None:
